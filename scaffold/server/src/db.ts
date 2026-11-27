@@ -1,13 +1,17 @@
 import { MongoClient, type Db } from 'mongodb';
 import { config } from './config.js';
 
-let client: MongoClient | undefined;
+let connecting: Promise<MongoClient> | undefined;
 
 // Connects on first use. Call from anywhere: const db = await getDb();
+// Connections are opened up front (minPoolSize), so a burst of webhooks on a
+// freshly started copy does not pay for thirty handshakes inside Pigeon's 5 s limit.
 export async function getDb(): Promise<Db> {
-  if (!client) {
-    client = new MongoClient(config.mongoUrl);
-    await client.connect();
-  }
-  return client.db();
+  connecting ??= new MongoClient(config.mongoUrl, { minPoolSize: 10, maxPoolSize: 50, serverSelectionTimeoutMS: 5000 })
+    .connect()
+    .catch((err) => {
+      connecting = undefined; // let the next call try again
+      throw err;
+    });
+  return (await connecting).db();
 }

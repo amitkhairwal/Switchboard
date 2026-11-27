@@ -1,0 +1,57 @@
+# Local Linux dev environment for Windows/macOS machines without a native Linux
+# shell. NOT used by grading (that uses docker-compose.yml).
+#
+# Everything shares the network namespace of the `dev` container, so every
+# default localhost URL in .env.example / harness/check.js works unchanged.
+#
+#   docker compose -f docker-compose.dev.yml up -d
+#   docker compose -f docker-compose.dev.yml exec dev sh
+#   (inside)  npm run scaffold:install ; npm run check
+
+x-mock: &mock
+  image: node:22-alpine
+  network_mode: "service:dev"
+  restart: unless-stopped
+  depends_on: [dev]
+
+services:
+  dev:
+    image: node:22-alpine
+    working_dir: /work
+    command: ["sh", "-c", "sleep infinity"]
+    volumes:
+      - .:/work
+      - nm_root:/work/node_modules
+      - nm_server:/work/scaffold/server/node_modules
+      - nm_web:/work/scaffold/web/node_modules
+    ports: ["4000:4000", "5173:5173", "4010:4010", "4020:4020"]
+
+  mongo:
+    image: mongo:7
+    network_mode: "service:dev"
+    depends_on: [dev]
+
+  redis:
+    image: redis:7-alpine
+    network_mode: "service:dev"
+    depends_on: [dev]
+
+  pigeon:
+    <<: *mock
+    working_dir: /srv
+    command: ["node", "server.js"]
+    volumes: ["./pigeon:/srv:ro"]
+    environment:
+      - PIGEON_TARGET_URL=http://localhost:4000/webhooks/pigeon
+      - PIGEON_WEBHOOK_SECRET=whsec_pigeon_dev
+
+  idp:
+    <<: *mock
+    working_dir: /srv
+    command: ["node", "server.js"]
+    volumes: ["./idp:/srv:ro"]
+
+volumes:
+  nm_root:
+  nm_server:
+  nm_web:

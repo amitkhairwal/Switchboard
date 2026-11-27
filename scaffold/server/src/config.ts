@@ -23,6 +23,8 @@ export const config = {
       ws_globex: env('PIGEON_KEY_WS_GLOBEX', 'pk_globex_c93b22'),
     } as Record<string, string>,
   },
+  // The businesses this deployment serves (each has a Pigeon key above).
+  workspaces: ['ws_acme', 'ws_globex'] as string[],
   oidc: {
     issuer: env('OIDC_ISSUER', 'http://localhost:4020'),
     clientId: env('OIDC_CLIENT_ID', 'switchboard-web'),
