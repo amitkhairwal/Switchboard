@@ -8,8 +8,22 @@ Work in progress; kept up to date as the build goes on.
   of PIGEON.md, idempotent storage of inbound messages (unique `(workspace, message_id)`).
 - **Grader endpoints** (`/__grader/*`): token guard, reset, snapshot, reply, claim.
 - **Outbox** (replies to customers), described below.
-- **Not built yet:** login (OIDC), `/api/*`, the WebSocket and the React app. Until they exist,
-  level 5 of the check scores 0.
+- **Not built:** login (OIDC), `/api/*`, the WebSocket and the React app. Level 5 of the check
+  (15 points) therefore scores 0, and nobody can use this as an inbox yet: there is no way to sign in,
+  list conversations, read messages, claim or reply except through the `/__grader/*` endpoints.
+  I started level 5 (OIDC login with state and PKCE in Redis, sessions in Redis, `/api/me`,
+  `/api/conversations`, `/ws` with an event stream and `after=` replay), but it was never run, so it is
+  **not in this repository**: I would not ship code I had not run, and it changes the webhook path that
+  the passing checks rely on.
+
+## What was run
+
+- **`CHECK_REPORT.json` is from `npm run check` only** (level 1, profile "quick"): 24 of 24. The full check
+  (`npm run check:full`, levels 1, 2, 3 and 5) was **not** run for this final commit, for lack of time.
+- Before that, `check:full` was run once on an earlier commit (`3f372f6`, the same server code apart from
+  documentation): level 1 24/24, level 2 14/14, level 3 22/22 (two copies), level 5 0/15 (not built); 60 of 75.
+  That report was overwritten by this one, but the numbers are in the git history of `CHECK_REPORT.json`.
+- Server tests (`npm --prefix scaffold/server test`): 29 passing at the last run.
 
 ## Cut on purpose
 
@@ -78,7 +92,8 @@ default `localhost` URL is unchanged.
 ## What I know is still wrong
 
 - **Level 5 and the product around it are missing:** no login, no `/api/*`, no WebSocket, no UI.
-  A reviewer cannot use this as an inbox yet.
+  A reviewer cannot use this as an inbox yet. Also not built: close/reopen, the inbox list and
+  message-reading endpoints for agents, tests of the web side (there is none).
 - **Clocks:** leases are compared with each server's own clock. Fine on one machine; across machines,
   clock skew would let a lease look expired early or late.
 - **Redis down:** the worker sends nothing (it cannot see the rate limit, and sending blind would break
@@ -86,6 +101,15 @@ default `localhost` URL is unchanged.
   state is lost on a Redis restart (the bucket starts full), at worst costing one `429` and a fresh
   cool-off. Sessions would be lost too.
 - **After a `kill -9`** a row that was mid-send waits up to the 10 s lease before another try.
+- **Untested, or only tested in one shape:**
+  - Level 4 (the private rules) cannot be run. I wrote tests for ten cases I read out of PIGEON.md and the
+    brief; the real ones may include cases the documents do not spell out.
+  - Only two copies of the server were ever run together; the grading check uses three.
+  - Redis going down or restarting mid-run, and MongoDB going down, were reasoned about, not tested.
+  - The permanent-failure path (Pigeon `400`) and the `401` retry are covered by one unit test each, never
+    against a real misbehaving Pigeon.
+  - Nothing was tested on a real clock skew, a large backlog (hundreds of queued replies), or a long run.
+  - The 400-versus-2xx choice for a known event type with missing fields (above) is a guess.
 - **One slow-start observation:** in one early run `ack_speed` failed (p95 4.7 s) and passed on every
   run since; I could not reproduce it in two attempts and did not find the cause. Stage timing code
   stays in behind `SB_TIMING=1`.
