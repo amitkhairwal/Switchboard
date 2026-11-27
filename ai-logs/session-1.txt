@@ -1,0 +1,2254 @@
+ ▐▛███▛█   Claude Code v2.1.332
+▝▜██████▀  Opus 5.5 · Claude Pro
+ ▝▝   ▝▝   ~\Desktop
+
+
+❯ /model                                                                        
+  ⎿  Set model to Opus 5.5 and saved as your default for new sessions
+
+❯ Hey, I'm working on a Switchboard build-round submission and I'm starting     
+  from zero. The project folder is C:\Users\HP\Downloads\starter. I'm setting   
+  up a fresh GitHub repo for it myself, so don't run git init or push anything  
+  yet.                                                                          
+                                                                                
+  Please read everything in that folder first (BRIEF.md, PIGEON.md and whatever 
+  else is there). Don't write any code yet.                                     
+                                                                                
+  After reading, tell me:                                                       
+  1. What the project actually asks for, level by level, in your own words.     
+  2. The rules in PIGEON.md ("How your endpoint must answer") and the ten       
+  level-4 rules in the brief. Level 4 can't be run locally, so I'd like you to  
+  point out which ones are easy to get wrong.                                   
+  3. The stack and file layout you'd pick, and why.                             
+  4. A build order with rough time per step. I have about 2.5 hours, so tell me 
+  what you'd cut first if we run out of time.                                   
+                                                                                
+  I'll look at the plan and then tell you to go ahead.                          
+
+  Read 2 files, ran 3 shell commands (ctrl+o to expand)
+
+● I've read the docs and the check harness. Next I'm going through the scaffold,
+  the simulators and the reference.
+
+  Ran 8 shell commands (ctrl+o to expand)
+
+● I've read everything in the folder. Here's the plan.
+
+  Before anything else: npm run check won't work properly on plain Windows.
+  harness/check.js starts your server with sh -c and kills it with
+  process.kill(-pid), which kills a whole process group. That only exists on
+  Linux and macOS. On Windows the kill fails silently, so levels 2 and 3 never
+  actually kill anything, and server copies are left holding ports. On this
+  machine:
+  - Docker Desktop is running, but docker isn't on the PATH in Git Bash.
+  - There's no Ubuntu WSL distro installed.
+  - You have Node 26, but grading runs on Node 22.
+
+  So I'd do the whole build in GitHub Codespaces using the included
+  .devcontainer, or install an Ubuntu WSL distro. That costs about 10 minutes
+  now and keeps the check honest.
+
+  1. What it asks for
+
+  The product: Switchboard, a shared team inbox used by several businesses
+  ("workspaces") at once.
+  - Simulated customers message a business through Pigeon, which posts signed
+    webhooks to you.
+  - Human support agents (not bots) sign in through the OIDC IdP, see
+    conversations update live and claim them. Only one agent can hold a
+    conversation at a time.
+  - Agents reply. Replies go out through Pigeon, and the agent sees their
+    status: queued, sent, delivered or failed.
+  - Workspaces must never see each other's data.
+
+  Scoring: 85 points come from the automatic check.
+
+  Level: 1
+  What happens: One copy of the server on a bad network. Webhooks arrive
+    duplicated, out of order, forged and replayed (correctly signed but an
+    hour old). Pigeon rate-limits, sometimes answers in 12 s, and has an
+    outage. Six agents claim the same conversation at once.
+  Points: 24
+  ────────────────────────────────────────
+  Level: 2
+  What happens: Your process is killed with kill -9 during a flood of
+    webhooks, and again right after it accepted a batch of replies. Nothing
+    may be lost or sent twice.
+  Points: 14
+  ────────────────────────────────────────
+  Level: 3
+  What happens: 2–3 copies behind a load balancer, sharing Mongo and Redis.
+    Level 1 must still hold. The rate limit is per workspace across all
+    copies. When one copy dies for good, the others finish its sends within 60
+    s.
+  Points: 22
+  ────────────────────────────────────────
+  Level: 4
+  What happens: Ten written rules from PIGEON.md and the contract, tested
+    privately.
+  Points: 10
+  ────────────────────────────────────────
+  Level: 5
+  What happens: The check signs in as a browser would, checks tenant isolation
+    (/api/me, /api/conversations), and tests the WebSocket live and with
+    after= replay, across several copies.
+  Points: 15
+
+  The remaining 15 points are reviewed by hand:
+  - security: 4
+  - data model, code quality and tests: 5
+  - frontend and what you chose to cut: 3
+  - AI usage, read from ai-logs/: 3
+
+  E2E-encrypted notes, search and billing are extras. The brief's recommended
+  order is levels 1 → 5 → 2 → 3.
+
+  2. The rules, and where people slip
+
+  PIGEON.md's table plus contract D give these rules. My guess at the ten
+  level-4 cases is marked with ★, with the trap for each:
+
+  ┌────────────────────────────┬────────────────────────────────────────────┐
+  │            Rule            │          Easy way to get it wrong          │
+  ├────────────────────────────┼────────────────────────────────────────────┤
+  │ ★ Signature missing,       │ crypto.timingSafeEqual throws when the two │
+  │ malformed or wrong → 401,  │  lengths differ, which turns into a 500. A │
+  │ never 5xx                  │  header without t= or v1= crashes a naive  │
+  │                            │ parser.                                    │
+  ├────────────────────────────┼────────────────────────────────────────────┤
+  │ ★ The HMAC covers the raw  │ express.json() runs first, and             │
+  │ body                       │ re-serialising the parsed body changes the │
+  │                            │  bytes. Use express.raw() on that route.   │
+  ├────────────────────────────┼────────────────────────────────────────────┤
+  │ ★ Timestamp more than 5    │ Off-by-one at the boundary (>= vs >), or a │
+  │ min old → 401; up to 5 min │  window tighter than 5 min. The reference  │
+  │  old → accept              │ says "more than five minutes from now", so │
+  │                            │  I'll use abs(now - t) > 300.              │
+  ├────────────────────────────┼────────────────────────────────────────────┤
+  │ ★ Body valid-signed but    │ Order matters: check the signature first,  │
+  │ not parseable → 400        │ then parse. A forged body that isn't JSON  │
+  │                            │ must still get 401.                        │
+  ├────────────────────────────┼────────────────────────────────────────────┤
+  │ ★ Unknown event type → 2xx │ Schema validation that rejects anything    │
+  │                            │ unexpected with 400.                       │
+  ├────────────────────────────┼────────────────────────────────────────────┤
+  │ ★ Status for a message you │ Answering 404, or creating a phantom       │
+  │  never sent → 2xx and      │ outbound entry that shows up in the        │
+  │ ignore                     │ snapshot.                                  │
+  ├────────────────────────────┼────────────────────────────────────────────┤
+  │ ★ Unknown workspace → 2xx  │ Storing it, or answering 4xx.              │
+  │ and ignore                 │                                            │
+  ├────────────────────────────┼────────────────────────────────────────────┤
+  │ ★ /__grader/* without the  │ Forgetting it on one route. Also: an empty │
+  │ token, or with a wrong one │  GRADER_TOKEN matching an empty header.    │
+  │  → 401                     │                                            │
+  ├────────────────────────────┼────────────────────────────────────────────┤
+  │ ★ Same client_ref twice at │ The second insert hits the unique index    │
+  │  the same instant → both   │ and the error becomes a 500. Catch E11000  │
+  │ get 202, one send          │ and answer 202.                            │
+  ├────────────────────────────┼────────────────────────────────────────────┤
+  │ ★ Reply or claim for a     │ The snapshot must then show that contact   │
+  │ contact who never wrote →  │ with inbound: []. The holder claiming      │
+  │ creates the conversation;  │ again must get 200, not 409.               │
+  │ unknown workspace → 4xx    │                                            │
+  └────────────────────────────┴────────────────────────────────────────────┘
+
+  Traps in the levels you can run:
+  - Order: sort inbound messages by occurred_at, then message_id. That's the
+    order Pigeon's truth uses, not arrival order.
+  - Duplicates: dedupe on a unique (workspace, message_id) index. Never dedupe
+    on event id, because a status event and an inbound event are different
+    events.
+  - Status regressions: delivered can arrive before sent. Rank the statuses and
+    never move backwards. Key statuses by client_ref, because the status webhook
+    can arrive before the slow 12 s HTTP response gives you the pm_ id.
+  - Never send twice: always send Idempotency-Key = client_ref. Give up on
+    Pigeon after about 3 s and retry with the same key. Pigeon replays the
+    original response instead of sending again.
+  - Retry-After: the rate limit and the 2 s cool-off must live in Redis, shared
+    by every copy (level 3). During the outage, back off; more than 6 requests a
+    second loses points. Cap the backoff at a few seconds so sends recover
+    quickly afterwards.
+  - Claim race: upsert the conversation first (ignoring duplicate-key errors),
+    then do one conditional update: findOneAndUpdate({assignee: null or me}).
+  - Login across copies: the load balancer can send /auth/callback to a
+    different copy than /auth/login. The PKCE verifier, state and sessions must
+    live in Redis or a cookie, not in memory.
+  - WebSocket seq order: if two copies each run INCR and then publish, frames
+    can arrive as 6 then 5, and the check marks that "NOT increasing". Use one
+    Lua script that does INCR and XADD to a Redis Stream per workspace in the
+    same step. Each copy then reads with XREAD and fans out, and replay is just
+    an XRANGE after seq.
+  - Reset: use deleteMany, not drop. Dropping a collection loses its unique
+    indexes mid-run. Keep the session keys.
+  - Start-up: /healthz should answer 200 only once Mongo, Redis and the indexes
+    are ready. Read PORT from the environment.
+
+  3. Stack and layout
+
+  I'd keep the scaffold. It already matches switchboard.json, reads all the env
+  vars, and changing it buys nothing. On top of it:
+  - ws for the WebSocket server, using noServer so I can refuse the upgrade with
+    401 or 403 before it completes.
+  - jose to verify the ID token against /jwks. The IdP's key changes every
+    restart, so it can't be hard-coded.
+  - PKCE written by hand (about 15 lines), node:test for tests, and no ORM.
+
+  Durable state lives in Mongo: messages, conversations and an outbox. Shared
+  coordination lives in Redis: sessions, the rate-limit bucket, the event stream
+  and the seq counter.
+
+  scaffold/server/src/
+    index.ts            wiring; healthz once ready; starts the worker and the 
+  WebSocket server
+    config.ts db.ts redis.ts   (as given; db.ts also creates the indexes)
+    webhooks/signature.ts      pure verify(t, raw, sig, now) -> tested
+    webhooks/pigeon.ts         raw body -> verify -> parse -> route by type
+    domain/conversations.ts    ensure, claim, close/reopen, list (paginated)
+    domain/messages.ts         inbound upsert, status rank/merge -> tested
+    outbox/enqueue.ts          insert {client_ref unique, status: queued} -> 202
+    outbox/worker.ts           lease jobs (leaseUntil), send with 
+  Idempotency-Key, backoff
+    outbox/ratelimit.ts        Redis Lua token bucket + shared cool-off -> 
+  tested
+    events/bus.ts              Lua INCR+XADD, XREAD fan-out, replay after seq
+    ws.ts  auth/oidc.ts  auth/session.ts  api/routes.ts  grader/routes.ts
+  scaffold/web/src/
+    App.tsx  api.ts  useSocket.ts (reconnect with after=lastSeq)
+    Inbox.tsx  Conversation.tsx (messages, reply box with status chips, 
+  claim/close)
+  README.md  DECISIONS.md  ai-logs/
+
+  Lease-based outbox: if a copy dies, its lease (about 15 s) runs out and
+  another copy picks the job up. That covers levels 2 and 3 with one mechanism.
+  Idempotency keys make the re-send safe.
+
+  4. Build order (about 2.5 h)
+
+  ┌─────┬────────────────────────────────────────────────────────────┬──────┐
+  │  #  │                            Step                            │ Time │
+  ├─────┼────────────────────────────────────────────────────────────┼──────┤
+  │ 0   │ Environment: Codespace or WSL, npm run up, doctor,         │ 10   │
+  │     │ scaffold:install                                           │ min  │
+  ├─────┼────────────────────────────────────────────────────────────┼──────┤
+  │     │ Webhook: signature, raw body, inbound upsert, all the "how │ 25   │
+  │ 1   │  to answer" rules; grader reset/snapshot with token. Run   │ min  │
+  │     │ npm run check now.                                         │      │
+  ├─────┼────────────────────────────────────────────────────────────┼──────┤
+  │ 2   │ Outbox, worker, Redis rate limit and cool-off, status      │ 30   │
+  │     │ webhooks, grader reply and claim. Check level 1.           │ min  │
+  ├─────┼────────────────────────────────────────────────────────────┼──────┤
+  │ 3   │ OIDC login with state and PKCE in Redis, sessions,         │ 20   │
+  │     │ /api/me, /api/conversations with 401/403                   │ min  │
+  ├─────┼────────────────────────────────────────────────────────────┼──────┤
+  │ 4   │ Event bus (Lua + Streams), /ws auth, after= replay. Check  │ 20   │
+  │     │ level 5.                                                   │ min  │
+  ├─────┼────────────────────────────────────────────────────────────┼──────┤
+  │ 5   │ React UI: login, inbox, conversation view, reply with      │ 20   │
+  │     │ status, claim/close, live updates                          │ min  │
+  ├─────┼────────────────────────────────────────────────────────────┼──────┤
+  │ 6   │ check:full and fixes for levels 2 and 3 (lease timing,     │ 15   │
+  │     │ health readiness)                                          │ min  │
+  ├─────┼────────────────────────────────────────────────────────────┼──────┤
+  │ 7   │ Tests: signature, status merge, rate limiter               │ 10   │
+  │     │                                                            │ min  │
+  ├─────┼────────────────────────────────────────────────────────────┼──────┤
+  │ 8   │ README, DECISIONS, check:full → CHECK_REPORT.json,         │ 10   │
+  │     │ ai-logs/, push, make public                                │ min  │
+  └─────┴────────────────────────────────────────────────────────────┴──────┘
+
+  Steps 1, 2 and 6 cover most of levels 1–3. I commit after every step. You said
+  not to run git init, so either you initialise the repo once you have it, or
+  tell me when to.
+
+  What I'd cut first, in order:
+  1. Encrypted notes, search and billing. I'd plan never to start these.
+  2. Polish in step 5. A plain functional UI is enough; pagination can be a
+     simple "load more".
+  3. Close/reopen and pagination beyond the basics. Neither is checked
+     automatically.
+  4. Step 7 tests, down to just the signature test.
+
+  I'd never cut steps 1–4 or the final check run. Without them the check scores
+  0 of 85.
+
+  Points to settle:
+  - The brief allows 2 hours (1:50 build, then 10 minutes to submit). Your 2.5 h
+    is fine if the round allows it; otherwise steps 5 and 7 shrink first.
+  - The reference says check:full takes "about five minutes" and the brief says
+    "about 4"; the brief wins where they differ.
+  - A known event type with missing fields will get 400. I'll record that in
+    DECISIONS.md.
+
+  Say go, and tell me whether you want Codespaces or WSL.
+
+✻ Worked for 2m 36s · done 6:53 PM
+
+❯ /model                                                                        
+  ⎿  Set model to Sonnet 5.5 and saved as your default for new sessions
+
+❯ Good plan, go ahead, with these changes.                                      
+                                                                                
+  Environment: I'm running you locally on this Windows machine, so Codespaces   
+  won't work for me. Try the Linux route first using Docker Desktop (it's       
+  running, but docker isn't on the Git Bash PATH, so look for docker.exe in its 
+  install folder or use PowerShell), with a Node 22 image so we match grading.  
+  If that can't run the check harness properly, tell me and I'll install an     
+  Ubuntu WSL distro. Don't spend more than about 10 minutes on this.            
+                                                                                
+  You can run git init in the starter folder now and commit after each step.    
+  I'll give you the GitHub remote URL at the end.                               
+                                                                                
+  Order: do the level-4 rules first, as part of your step 1 (webhook). Skip     
+  encrypted notes, search and billing completely, and write in DECISIONS.md     
+  that encrypted notes are cut, because a half-finished E2E scheme is worse     
+  than none.                                                                    
+                                                                                
+  Before you write the claim logic, answer this: why do you use a MongoDB       
+  atomic conditional update for the claim instead of a Redis lock (SET NX)? And 
+  what happens to a claim, and to the rate-limit and cool-off state, if Redis   
+  restarts?                                                                     
+                                                                                
+  Then build step 0 and step 1 only. For each of the ten level-4 rules (your ★  
+  list) point me to the exact file and line that handles it, and write a small  
+  test for any rule that has no coverage. Run the server's test command and     
+  paste the raw output here before doing anything else. Also run npm run check  
+  for what is runnable at this point and show me the result.                    
+
+● Answer to your question first, then I'll build step 0.
+
+  Why a Mongo conditional update and not Redis SET NX:
+  - The claim is the source of truth that the snapshot, the API and the
+    WebSocket all show. It must be as durable as the conversation it sits on, so
+    it belongs in the same document and the same atomic write.
+  - A Redis lock is a second system. "Take the lock, then write the assignee to
+    Mongo" is two steps, and a crash between them leaves a lock with no assignee
+    or an assignee with no lock.
+  - A conditional findOneAndUpdate is one atomic operation: {contact, assignee ∈
+    {null, me}} → $set assignee. The holder claiming again matches the filter,
+    so it gets 200 with no special case.
+
+  If Redis restarts:
+  - Claims are unaffected, because they live in Mongo.
+  - Rate-limit bucket and cool-off are lost. The bucket would restart full (8
+    tokens) and a 2 s Retry-After would be forgotten. The worst case is one
+    burst of early requests, which Pigeon would answer with a 429 and a new
+    cool-off. I'll treat a Redis outage as "back off 2 s and retry". The outbox
+    in Mongo means no reply is lost.
+  - Sessions are lost, so users have to log in again. I'll note that in
+    DECISIONS.md.
+  - The event stream and seq counter are lost. That is the real problem, because
+    seq would restart at 0 and break after= replay. I'll keep the seq counter
+    in Mongo, or re-seed it from the highest stored seq, so it never goes
+    backwards.
+
+  Now step 0.
+
+  Ran 3 shell commands · 2 failed (ctrl+o to expand)
+
+● Docker is running from PowerShell with the Node 22 Alpine, Mongo and Redis
+  images already local. I'm setting up a dev container with the repo mounted,
+  and I'll keep that in a separate docker-compose.dev.yml so the given compose
+  file stays untouched. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Write(~\Downloads\starter\starter\docker-compose.dev.yml)
+  ⎿  Wrote 57 lines to ~\Downloads\starter\starter\docker-compose.dev.yml
+      1 # Local Linux dev environment for Windows/macOS machines without 
+        a native Linux
+      2 # shell. NOT used by grading (that uses docker-compose.yml).
+      3 #
+      4 # Everything shares the network namespace of the `dev` container,
+         so every
+      5 # default localhost URL in .env.example / harness/check.js works 
+        unchanged.
+      6 #
+      7 #   docker compose -f docker-compose.dev.yml up -d
+     … +50 lines (ctrl+o to expand)
+
+  Ran 1 shell command · 1 failed (ctrl+o to expand)
+
+● Pigeon, the IdP and Redis are up, and I'm checking Mongo, which isn't
+  responding yet. The git and Docker FAILs are just the doctor's checks run from
+  inside Alpine, and Paybox can be skipped since billing is cut. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Mongo is still finishing crash recovery, and since the Docker VM has only 2 GB
+  without Elasticsearch, I'm installing the server dependencies (ws and jose)
+  inside the Linux container next. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Step 0 is done: Mongo, Redis, Pigeon and the IdP all answer inside a Linux
+  Node 22 container. Now step 1, starting with the pure signature verifier,
+  since it carries most of the level-4 rules.
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\webhooks\signature.ts)
+  ⎿  Wrote 51 lines to
+     ~\Downloads\starter\starter\scaffold\server\src\webhooks\signature.ts
+       1 import { createHmac, timingSafeEqual } from 'node:crypto';
+       2 
+       3 export const MAX_SKEW_SECONDS = 300; // "more than five minutes 
+         old" is rejected
+       4 
+       5 export type SignatureResult = 'ok' | 'bad' | 'stale';
+       6 
+       7 // Parses `t=<unix seconds>,v1=<hex>` without ever throwing. Any
+         thing that does
+       8 // not look exactly like that is "bad", and the caller answers 4
+     … +44 lines (~2 KB) (ctrl+o to expand)
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\config.ts)
+  ⎿  File must be read first
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\config.ts)
+  ⎿  Added 2 lines
+      23        ws_globex: env('PIGEON_KEY_WS_GLOBEX', 'pk_globex_c93b22'
+          ),
+      24      } as Record<string, string>,
+      25    },
+      26 +  // The businesses this deployment serves (each has a Pigeon k
+         +ey above).                                                     
+      27 +  workspaces: ['ws_acme', 'ws_globex'] as string[],            
+      28    oidc: {
+      29      issuer: env('OIDC_ISSUER', 'http://localhost:4020'),
+      30      clientId: env('OIDC_CLIENT_ID', 'switchboard-web'),
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\domain\store.ts)
+  ⎿  Wrote 167 lines to
+     ~\Downloads\starter\starter\scaffold\server\src\domain\store.ts
+       1 import type { Collection, Db } from 'mongodb';
+       2 import { getDb } from '../db.js';
+       3 import { getRedis } from '../redis.js';
+       4 
+       5 // ---- documents ----------------------------------------------
+         -------------
+       6 export type OutboundStatus = 'queued' | 'sent' | 'delivered' | '
+         failed';
+       7 
+       8 export interface MessageDoc {
+     … +159 lines (ctrl+o to expand)
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\webhooks\pigeon.ts)
+  ⎿  Wrote 75 lines to
+     ~\Downloads\starter\starter\scaffold\server\src\webhooks\pigeon.ts
+       1 import type { Request, Response } from 'express';
+       2 import { verifySignature } from './signature.js';
+       3 import type { OutboundStatus, PigeonStore } from '../domain/stor
+         e.js';
+       4 
+       5 export interface PigeonDeps {
+       6   secret: string;
+       7   workspaces: ReadonlySet<string>;
+       8   store: PigeonStore;
+       9   now?: () => number; // ms; injectable for tests
+     … +66 lines (ctrl+o to expand)
+
+● Now the claim, reply and snapshot logic, the grader routes and the server
+  wiring.
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\domain\conversations.ts)
+  ⎿  Wrote 62 lines to ~\Downloads\starter\starter\scaffold\server\src\doma
+     in\conversations.ts
+       1 import { collections, ensureConversation, isDuplicateKey } from
+         './store.js';
+       2 
+       3 // Claim: ONE atomic conditional update in MongoDB, on the same 
+         document that
+       4 // stores the assignee. The filter only matches while nobody els
+         e holds it, so
+       5 // six simultaneous claims have exactly one winner, across any n
+         umber of
+       6 // server copies, and the claim survives a Redis restart.
+     … +56 lines (ctrl+o to expand)
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\grader\routes.ts)  ⎿  Wrote 69 lines to
+     ~\Downloads\starter\starter\scaffold\server\src\grader\routes.ts
+      1 import { timingSafeEqual } from 'node:crypto';
+      2 import { Router, type NextFunction, type Request, type RequestHan
+        dler, type Response } from 'express';
+      3 import { config } from '../config.js';
+      4 import { buildSnapshot, claimConversation, enqueueReply } from '.
+        ./domain/conversations.js';
+      5 import { resetAll } from '../domain/store.js';
+      6 
+      7 export const wrap = (fn: (req: Request, res: Response) => Promise
+        <unknown>): RequestHandler => (req, res, next) => {
+     … +62 lines (ctrl+o to expand)
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\index.ts)
+  ⎿  Couldn't write file
+
+  Read 1 file (ctrl+o to expand)
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\index.ts)
+  ⎿  Added 41 lines, removed 4 lines
+       1 -import express from 'express';                                 
+       1 +import express, { type NextFunction, type Request, type Respons
+         +e } from 'express';                                            
+       2  import { createServer } from 'node:http';
+       3  import { config } from './config.js';
+       4 +import { mongoStore, initStore } from './domain/store.js';     
+       5 +import { graderRouter } from './grader/routes.js';             
+       6 +import { createPigeonHandler } from './webhooks/pigeon.js';    
+       7 
+       8  const app = express();
+       9 +app.disable('x-powered-by');                                   
+      10 
+      11 +// 200 only when this copy can really serve: MongoDB and Redis 
+         +reachable, indexes in place.                                   
+      12 +let ready = false;                                             
+      13  app.get('/healthz', (_req, res) => {
+       8 -  res.json({ ok: true });                                      
+      14 +  res.status(ready ? 200 : 503).json({ ok: ready });           
+      15  });
+      16 
+      11 -// Everything else is yours.                                   
+      17 +// The webhook gets the raw bytes (the signature covers them); 
+         +every other route gets JSON.                                   
+      18 +const pigeonHandler = createPigeonHandler({ secret: config.pige
+         +on.webhookSecret, workspaces: new Set(config.workspaces), store
+         +: mongoStore });                                               
+      19 +app.post('/webhooks/pigeon', express.raw({ type: () => true, li
+         +mit: '2mb' }), (req, res, next) => {                           
+      20 +  pigeonHandler(req, res).catch(next);                         
+      21 +});                                                            
+      22 
+      13 -// A plain http server, so you can attach WebSockets to it.    
+      23 +app.use(express.json({ limit: '1mb' }));                       
+      24 +app.use('/__grader', graderRouter);                            
+      25 +                                                               
+      26 +// Last resort. A storage failure on the webhook is a 5xx ON PU
+         +RPOSE: Pigeon must                                             
+      27 +// retry, because we did not store the event. Bad input never r
+         +eaches here.                                                   
+      28 +app.use((err: Error & { status?: number }, _req: Request, res: 
+         +Response, _next: NextFunction) => {                            
+      29 +  const status = err.status && err.status >= 400 && err.status 
+         +< 500 ? err.status : 503;                                      
+      30 +  if (status >= 500) console.error('request failed:', err.messa
+         +ge);                                                           
+      31 +  res.status(status).json({ error: status >= 500 ? 'temporarily
+         + unavailable' : err.message });                                
+      32 +});                                                            
+      33 +                                                               
+      34 +process.on('unhandledRejection', (e) => console.error('unhandle
+         +dRejection', e));                                              
+      35 +                                                               
+      36 +// A plain http server, so WebSockets can attach to it later.  
+      37  const server = createServer(app);
+      38  server.listen(config.port, () => {
+      39    console.log(`server on http://localhost:${config.port}`);
+      40  });
+      41 +                                                               
+      42 +(async function boot() {                                       
+      43 +  for (;;) {                                                   
+      44 +    try {                                                      
+      45 +      await initStore();                                       
+      46 +      ready = true;                                            
+      47 +      console.log('ready');                                    
+      48 +      return;                                                  
+      49 +    } catch (e) {                                              
+      50 +      console.error('waiting for MongoDB/Redis:', (e as Error).
+         +message);                                                      
+      51 +      await new Promise((r) => setTimeout(r, 1000));           
+      52 +    }                                                          
+      53 +  }                                                            
+      54 +})();                                                          
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● I'm splitting the Express app into app.ts, so the tests run the real wiring
+  without opening port 4000.
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\app.ts)
+  ⎿  Wrote 39 lines to
+     ~\Downloads\starter\starter\scaffold\server\src\app.ts
+      1 import express, { type NextFunction, type Request, type Response
+        } from 'express';
+      2 import { config } from './config.js';
+      3 import { graderRouter } from './grader/routes.js';
+      4 import type { PigeonStore } from './domain/store.js';
+      5 import { createPigeonHandler } from './webhooks/pigeon.js';
+      6 
+      7 export function createApp(opts: { store: PigeonStore; isReady: ()
+         => boolean }) {
+      8   const app = express();
+     … +31 lines (ctrl+o to expand)
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\index.ts)
+  ⎿  Added 3 lines, removed 28 lines
+       1 -import express, { type NextFunction, type Request, type Respons
+         -e } from 'express';                                            
+       1  import { createServer } from 'node:http';
+       2 +import { createApp } from './app.js';                          
+       3  import { config } from './config.js';
+       4 -import { mongoStore, initStore } from './domain/store.js';     
+       5 -import { graderRouter } from './grader/routes.js';             
+       6 -import { createPigeonHandler } from './webhooks/pigeon.js';    
+       4 +import { initStore, mongoStore } from './domain/store.js';     
+       5 
+       8 -const app = express();                                         
+       9 -app.disable('x-powered-by');                                   
+      10 -                                                               
+      11 -// 200 only when this copy can really serve: MongoDB and Redis 
+         -reachable, indexes in place.                                   
+       6  let ready = false;
+      13 -app.get('/healthz', (_req, res) => {                           
+      14 -  res.status(ready ? 200 : 503).json({ ok: ready });           
+      15 -});                                                            
+       7 +const app = createApp({ store: mongoStore, isReady: () => ready
+         + });                                                           
+       8 
+      17 -// The webhook gets the raw bytes (the signature covers them); 
+         -every other route gets JSON.                                   
+      18 -const pigeonHandler = createPigeonHandler({ secret: config.pige
+         -on.webhookSecret, workspaces: new Set(config.workspaces), store
+         -: mongoStore });                                               
+      19 -app.post('/webhooks/pigeon', express.raw({ type: () => true, li
+         -mit: '2mb' }), (req, res, next) => {                           
+      20 -  pigeonHandler(req, res).catch(next);                         
+      21 -});                                                            
+      22 -                                                               
+      23 -app.use(express.json({ limit: '1mb' }));                       
+      24 -app.use('/__grader', graderRouter);                            
+      25 -                                                               
+      26 -// Last resort. A storage failure on the webhook is a 5xx ON PU
+         -RPOSE: Pigeon must                                             
+      27 -// retry, because we did not store the event. Bad input never r
+         -eaches here.                                                   
+      28 -app.use((err: Error & { status?: number }, _req: Request, res: 
+         -Response, _next: NextFunction) => {                            
+      29 -  const status = err.status && err.status >= 400 && err.status 
+         -< 500 ? err.status : 503;                                      
+      30 -  if (status >= 500) console.error('request failed:', err.messa
+         -ge);                                                           
+      31 -  res.status(status).json({ error: status >= 500 ? 'temporarily
+         - unavailable' : err.message });                                
+      32 -});                                                            
+      33 -                                                               
+       9  process.on('unhandledRejection', (e) => console.error('unhandle
+          dRejection', e));
+      10 
+      11  // A plain http server, so WebSockets can attach to it later.
+
+● Now the tests. They cover all ten ★ rules: the pure signature rules, the
+  handler rules with a fake store, and the Mongo-backed grader rules.
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\webhooks\signature.test.
+       ts)
+  ⎿  Wrote 34 lines to ~\Downloads\starter\starter\scaffold\server\src\webh
+     ooks\signature.test.ts
+       1 import assert from 'node:assert/strict';
+       2 import { test } from 'node:test';
+       3 import { sign, verifySignature } from './signature.js';
+       4 
+       5 const SECRET = 'whsec_pigeon_dev';
+       6 const NOW = 1_800_000_000;
+       7 const body = Buffer.from('{"a":1}');
+       8 const header = (t: number, mac = sign(SECRET, t, body)) => `t=${
+         t},v1=${mac}`;
+       9 
+     … +25 lines (ctrl+o to expand)
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\webhooks\pigeon.test.ts)
+  ⎿  Wrote 117 lines to ~\Downloads\starter\starter\scaffold\server\src\web
+     hooks\pigeon.test.ts
+       1 import assert from 'node:assert/strict';
+       2 import type { AddressInfo } from 'node:net';
+       3 import { after, before, beforeEach, test } from 'node:test';
+       4 import { createServer, type Server } from 'node:http';
+       5 import { createApp } from '../app.js';
+       6 import type { PigeonStore } from '../domain/store.js';
+       7 import { sign } from './signature.js';
+       8 
+       9 // The "how your endpoint must answer" table of PIGEON.md, one t
+         est per row.
+     … +108 lines (ctrl+o to expand)
+
+● The rule N labels I just wrote don't match the ★ numbering from my plan, so
+  I'll fix that after the Mongo-backed tests.
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\grader\grader.test.ts)
+  ⎿  Wrote 107 lines to
+     ~\Downloads\starter\starter\scaffold\server\src\grader\grader.test.ts
+      1 import assert from 'node:assert/strict';
+      2 import type { AddressInfo } from 'node:net';
+      3 import { createServer, type Server } from 'node:http';
+      4 import { after, before, test } from 'node:test';
+      5 
+      6 // Integration tests against the real MongoDB and Redis (the dev 
+        container has
+      7 // them). They use their own database and are skipped if MongoDB 
+        is unreachable.
+      8 process.env.MONGO_URL = (process.env.MONGO_URL ?? 'mongodb://loca
+     … +100 lines (~6 KB) (ctrl+o to expand)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Now I'll run the typecheck and the server's test command in the Linux
+  container, and paste the raw output.
+
+  Ran 1 shell command · 1 failed (ctrl+o to expand)
+
+● The typecheck is clean. 19 of 20 tests passed, and the one failure is a bug in
+  my test: it sends {} as the body of a GET request, which fetch refuses. I'll
+  fix the test and rerun.
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\grader\grader.test.ts)
+  ⎿  Added 1 line, removed 1 line
+      40    fetch(base + path, {
+      41      method,
+      42      headers: { 'content-type': 'application/json', ...(token ==
+          = null ? {} : { 'x-grader-token': token }) },
+      43 -    body: body === undefined ? undefined : JSON.stringify(body)
+         -,                                                              
+      43 +    body: body === undefined || method === 'GET' ? undefined : 
+         +JSON.stringify(body),                                          
+      44    });
+      45 
+      46  test('every /__grader route answers 401 without the token or wi
+          th a wrong one', { skip: !available }, async () => {
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● All 20 tests pass. The # request failed: mongo down line is the test that
+  deliberately breaks the store to confirm the answer is a 5xx. Next is npm run 
+  check (level 1) inside the container.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Inbound checks are all clean (170 of 170 stored, no duplicates or forged
+  events), and the three send failures are expected since the sender worker is
+  step 2. The real problem is ack_speed, with a p95 of 4.7 s and 38
+  unacknowledged first attempts, which I'm tracing now. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The log is clean and the container is idle, so I'm reproducing the issue
+  directly by starting the server on port 4000 with the same chaos profile and
+  reading Pigeon's latency numbers. · summary
+
+  Ran 1 shell command · 1 failed (ctrl+o to expand)
+
+● Quoting through PowerShell is getting in the way, so I'll put the steps in a
+  script file and run that.
+
+● Write(~\Downloads\starter\starter\scripts\dev-ack-probe.sh)
+  ⎿  Wrote 14 lines to ~\Downloads\starter\starter\scripts\dev-ack-probe.sh
+       1 #!/bin/sh
+       2 # Dev helper (run inside the dev container): start the server on
+          :4000, run the
+       3 # chaos profile against it, print Pigeon's view of our acknowled
+         gement latency.
+       4 cd /work
+       5 (npm --prefix scaffold/server start > /tmp/srv.log 2>&1 &)
+       6 sleep 6
+       7 curl -s localhost:4000/healthz; echo
+       8 curl -s -XPOST localhost:4000/__grader/reset -H 'x-grader-token:
+     … +7 lines (ctrl+o to expand)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The container lacks curl, so the chaos probe didn't run and the earlier 300 ms
+  ack figures are stale. I'm measuring the handler directly with a Node script
+  next. · summary
+
+● Write(~\Downloads\starter\starter\scripts\dev-ack-probe.mjs)
+  ⎿  Wrote 33 lines to
+     ~\Downloads\starter\starter\scripts\dev-ack-probe.mjs
+       1 // Dev helper (run inside the dev container, with the server on 
+         :4000):
+       2 // times signed webhooks one at a time and then 30 at once.
+       3 import { createHmac, randomBytes } from 'node:crypto';
+       4 
+       5 const SECRET = 'whsec_pigeon_dev';
+       6 const URL = 'http://localhost:4000/webhooks/pigeon';
+       7 const ev = (i) =>
+       8   JSON.stringify({
+       9     id: 'evt_probe' + randomBytes(4).toString('hex') + i,
+     … +24 lines (ctrl+o to expand)
+  Ran 1 shell command · 1 failed (ctrl+o to expand)
+
+● Serial requests run in about 15 ms, so the problem is the burst: 30 concurrent
+  upserts to the same contact take 200–800 ms, likely all writing one
+  conversation document. I'm testing that next by spreading the same burst
+  across different contacts. · summary
+
+  Ran 2 shell commands · 1 failed (ctrl+o to expand)
+
+● Spreading the load across contacts didn't help (215–276 ms versus 310–372 ms),
+  so the slowness is the server in this environment, not contention on one
+  document. Under real chaos load requests queue, time out at Pigeon's 5 s
+  limit, and the retries add more load, so I'm next going to profile where the
+  time goes during an actual chaos run. · summary
+
+● Write(~\Downloads\starter\starter\scripts\dev-chaos.mjs)
+  ⎿  Wrote 10 lines to ~\Downloads\starter\starter\scripts\dev-chaos.mjs
+       1 // Dev helper (run inside the dev container, with the server on 
+         :4000):
+       2 // resets, runs Pigeon's chaos profile for 20 s, prints what Pig
+         eon saw of our acks.
+       3 const P = 'http://localhost:4010';
+       4 const post = (path, body) => fetch(P + path, { method: 'POST', h
+         eaders: { 'content-type': 'application/json' }, body: JSON.strin
+         gify(body || {}) });
+       5 await fetch('http://localhost:4000/__grader/reset', { method: 'P
+         OST', headers: { 'x-grader-token': 'grader-dev-token' } });
+     … +5 lines (ctrl+o to expand)
+
+  Ran 1 shell command · 1 failed (ctrl+o to expand)
+
+● Direct runs against the server were fast (p50 16 ms, p95 174 ms, no failed
+  first attempts), so the 4.7 s in the check run was likely a one-off from
+  Mongo's crash recovery or the load balancer. I'll pre-open Mongo connections
+  to avoid the handshake burst on a cold start, then rerun the check. · summary
+
+  Read 1 file (ctrl+o to expand)
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\db.ts)
+  ⎿  Added 10 lines, removed 6 lines
+       1  import { MongoClient, type Db } from 'mongodb';
+       2  import { config } from './config.js';
+       3 
+       4 -let client: MongoClient | undefined;                           
+       4 +let connecting: Promise<MongoClient> | undefined;              
+       5 
+       6  // Connects on first use. Call from anywhere: const db = await 
+          getDb();
+       7 +// Connections are opened up front (minPoolSize), so a burst of
+         + webhooks on a                                                 
+       8 +// freshly started copy does not pay for thirty handshakes insi
+         +de Pigeon's 5 s limit.                                         
+       9  export async function getDb(): Promise<Db> {
+       8 -  if (!client) {                                               
+       9 -    client = new MongoClient(config.mongoUrl);                 
+      10 -    await client.connect();                                    
+      11 -  }                                                            
+      12 -  return client.db();                                          
+      10 +  connecting ??= new MongoClient(config.mongoUrl, { minPoolSize
+         +: 10, maxPoolSize: 50, serverSelectionTimeoutMS: 5000 })       
+      11 +    .connect()                                                 
+      12 +    .catch((err) => {                                          
+      13 +      connecting = undefined; // let the next call try again   
+      14 +      throw err;                                               
+      15 +    });                                                        
+      16 +  return (await connecting).db();                              
+      17  }
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The ack_speed check now passes and the score is 19 of 24, with the remaining
+  sends left for step 2. After the db.ts change I'll rerun the tests and
+  typecheck, then write DECISIONS.md. · summary
+
+● Write(~\Downloads\starter\starter\DECISIONS.md)
+  ⎿  Wrote 47 lines to ~\Downloads\starter\starter\DECISIONS.md
+       1 # Decisions
+       2 
+       3 Work in progress; kept up to date as the build goes on.
+       4 
+       5 ## Cut on purpose
+       6 
+       7 - **Encrypted private notes (and `PROTOCOL.md`): cut.** A half-f
+         inished end-to-end
+       8   scheme is worse than none: it would look like a guarantee the
+         server does not
+     … +39 lines (ctrl+o to expand)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Everything is green. I'll gather the exact line numbers for the rule map and
+  commit.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Steps 0 and 1 are built and committed (1bb4d61). The ack-speed check failed on
+  the first run and passed on the rerun, and I don't know why it failed (more
+  below).
+
+  Step 0: environment
+
+  npm run check runs inside a Linux Node 22 container, with Docker called from
+  PowerShell. I used docker.exe from …\DockerDesktop\resources\bin. Mongo,
+  Redis, Pigeon and the IdP share that container's network, so every default
+  localhost URL is unchanged. That is docker-compose.dev.yml, and the given
+  compose file is untouched. Process-group kill and sh work there, so levels 2
+  and 3 will be real tests. No WSL Ubuntu is needed. The Docker VM has only 2 GB
+  of RAM, so Elasticsearch is out, which suits the plan.
+
+  Test output
+
+  The server tests are npm test in scaffold/server. The typecheck is clean and
+  the last run was 20 of 20 passing, 0 failed, 0 skipped. The raw output is
+  above. The first run had one failure, a bug in my test: it sent a body on a
+  GET. I fixed the test and reran, and src/ is unchanged by that.
+
+  npm run check (level 1): 19 of 24
+
+  - Passing: all six inbound checks (169 of 169 stored, 0 duplicates, 0 order
+    errors, no forged or replayed events accepted), plus ack speed, claim
+    atomicity and honouring Retry-After.
+  - Failing, as expected: outbound_exactly_once, status_lifecycle and
+    outage_recovery. They need the sender worker from step 2, so replies sit
+    queued for now. The check's honours_retry_after passes only because nothing
+    is sent.
+  - The one thing I can't explain: on the first run ack_speed failed (p95 4.7 s,
+    38 unacknowledged first attempts), and on the rerun it passed (p95 282 ms).
+    - Between the two runs I made Mongo open its connections up front (db.ts),
+      so a burst on a freshly started server doesn't pay for 30 handshakes.
+    - Run directly, outside the check, the same chaos load gave p50 16 ms with
+      no failures even before that change. So the fix is plausible, but the
+      first failure could equally have been Mongo's crash recovery in the 2 GB
+      VM.
+    - I'll watch this metric on every later check run.
+
+  Where each ★ rule is handled
+
+  ★ rule: 1. Bad or missing signature gets 401, never 5xx
+  Code: signature.ts:43-46, pigeon.ts:25-28. The parser never throws, and the
+    fixed 64-hex length means timingSafeEqual can't throw either.
+  Test: forged:…, missing or malformed headers…
+  ────────────────────────────────────────
+  ★ rule: 2. MAC covers the raw body
+  Code: app.ts:23 (express.raw), pigeon.ts:21
+  Test: raw body: the MAC covers…
+  ────────────────────────────────────────
+  ★ rule: 3. Over 5 minutes old gets 401, up to 5 minutes is accepted
+  Code: signature.ts:49
+  Test: replay…, slow network…, and the 299/300/301 boundary test
+  ────────────────────────────────────────
+  ★ rule: 4. Signed body that can't be parsed gets 400
+  Code: pigeon.ts:34-42 (the signature check runs first, so a forged non-JSON
+    body still gets 401)
+  Test: unparseable…
+  ────────────────────────────────────────
+  ★ rule: 5. Unknown event type gets 2xx
+  Code: pigeon.ts:46
+  Test: unknown type…
+  ────────────────────────────────────────
+  ★ rule: 6. Status for a message never sent gets 2xx and is ignored
+  Code: pigeon.ts:72, store.ts applyStatus
+  Test: unknown status… and the never_sent check
+  ────────────────────────────────────────
+  ★ rule: 7. Unknown workspace gets 2xx and is ignored
+  Code: pigeon.ts:47
+  Test: unknown workspace…
+  ────────────────────────────────────────
+  ★ rule: 8. /__grader/* without the token gets 401
+  Code: grader/routes.ts:11-23 (an empty configured token never matches)
+  Test: every /__grader route answers 401… (no header, wrong, empty)
+  ────────────────────────────────────────
+  ★ rule: 9. Same client_ref at the same instant gets one reply, both get 202
+  Code: conversations.ts:25-40, with the unique index at store.ts:61
+  Test: same client_ref asked many times… (12 at once, one row)
+  ────────────────────────────────────────
+  ★ rule: 10. Reply or claim creates the conversation, unknown workspace is
+    4xx, the holder claiming again gets 200
+  Code: conversations.ts:23, grader/routes.ts:49,63, claim at
+    conversations.ts:10-18
+  Test: a reply to a contact who never wrote…, …does not exist is a 4xx, six
+    agents claiming at once…
+
+  Every one of the ten has a test. The tests also cover the
+  status-only-moves-forward rule and a storage failure returning 503, so Pigeon
+  retries.
+
+  Decisions to check
+
+  - Known event with missing fields: a known event type with missing fields gets
+    400, which is my reading of "cannot parse". It's written down in
+    DECISIONS.md, along with the cuts (encrypted notes, search, billing).
+  - Level-4 guess: my ten ★ rules are a reading of the written docs, not the
+    real private level 4. If that file includes edge cases the docs don't spell
+    out, I won't see them.
+  - Stray helpers: scripts/dev-ack-probe.sh, a leftover from the failed probe,
+    doesn't work (no curl in Alpine). The two .mjs probes work. I'll delete the
+    .sh file in the next commit unless you want to keep any of them.
+  - No remote: there's no remote yet, and nothing has been pushed.
+
+  Step 2 is next: the outbox worker, the Redis rate limit and cool-off, and
+  outage handling.
+
+✻ Worked for 17m 25s · done 7:12 PM
+
+❯ Nice work on the rule table and the test output, that is what I wanted. Three 
+  things before step 2.                                                         
+                                                                                
+  1. ack_speed. It failed once and passed once and you don't know why. I don't  
+  want to carry that into levels 2 and 3, where the load is higher. Measure it  
+  once: while the chaos profile runs, log how long each stage of the webhook    
+  handler takes (signature check, Mongo write, response) and tell me which one  
+  is slow when the p95 goes up. Keep the timing code out of the final commit,   
+  or behind a debug flag. If you can't reproduce the slow case after two tries, 
+  say so and move on, don't burn more time on it.                               
+  2. Missing fields on a known event type. You return 400 for it and call that  
+  "cannot parse". Quote me the exact sentences from PIGEON.md and the brief     
+  that say what to do with a malformed or incomplete event, and then tell me if 
+  400 or 2xx is the safer reading. A wrong answer here may cost points in the   
+  private level 4.                                                              
+  3. Housekeeping. Delete dev-ack-probe.sh. Move the two .mjs probes to         
+  scripts/dev/ or delete them, and give docker-compose.dev.yml two lines in the 
+  README so a reviewer understands why it exists.                               
+                                                                                
+  Then commit and start step 2: the outbox, the worker, the Redis rate limit    
+  and cool-off, and the status webhooks. When you write the worker, keep in     
+  mind two cases that I will ask you to prove with tests later. One is the      
+  process getting killed right after the reply endpoint returns 202 but before  
+  Pigeon is called. The other is Pigeon accepting the message but answering     
+  slowly, after our timeout fired and after our lease expired. Write the code   
+  so both are easy to test, and tell me what idempotency key and lease timing   
+  you chose and why.                                                            
+
+● I'll start with the timing measurement (item 1), then answer the 400-or-2xx
+  question from the actual documents (item 2), then do the housekeeping and step
+  2.
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\timing.ts)
+  ⎿  Wrote 49 lines to
+     ~\Downloads\starter\starter\scaffold\server\src\timing.ts
+       1 import { monitorEventLoopDelay } from 'node:perf_hooks';
+       2 
+       3 // Debug-only stage timing. Off unless SB_TIMING=1, and then it 
+         costs one
+       4 // boolean check per call. It prints a summary every 2 s to stde
+         rr (which the
+       5 // check harness writes to .check-logs/instance-N.log).
+       6 export const TIMING = process.env.SB_TIMING === '1';
+       7 
+       8 const windowSamples = new Map<string, number[]>();
+     … +41 lines (ctrl+o to expand)
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\webhooks\pigeon.ts)
+  ⎿  Added 1 line, removed 1 line
+      64          text: typeof data.text === 'string' ? data.text : '',
+      65          occurredAt,
+      66          eventId: event.id,
+      67 -      });                                                      
+      67 +      }));                                                     
+      68        res.status(200).json({ ok: true });
+      69        return;
+      70      }
+
+  Read 1 file, ran 2 shell commands (ctrl+o to expand)
+
+● The sed edit left the closing of app.post( broken, so I'll fix that by hand,
+  then add the report start and the pool env var.
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\app.ts)
+  ⎿  Added 3 lines, removed 2 lines
+      32      express.raw({ type: () => true, limit: '2mb' }),
+      33      (req, res, next) => {
+      34        record('read_body', performance.now() - (req as unknown a
+          s { t0: number }).t0);
+      35 -    pigeonHandler(req, res).catch(next);                       
+      36 -  });                                                          
+      35 +      pigeonHandler(req, res).catch(next);                     
+      36 +    },                                                         
+      37 +  );                                                           
+      38 
+      39    app.use(express.json({ limit: '1mb' }));
+      40    app.use('/__grader', graderRouter);
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The timing instrumentation is in place and stays off unless SB_TIMING=1 is
+  set. Next I'll run try 1, which reproduces the original failure with Mongo
+  freshly restarted and the old pool setting. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Try 1 didn't reproduce the failure: ack_speed passed at a p95 of 123 ms, with
+  the event loop never lagging more than 58 ms. I'm fixing a narrowing error the
+  typecheck caught, then rerunning as try 2 right after the suite with the tsx
+  cache cleared. · summary
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\webhooks\pigeon.ts)
+  ⎿  Added 3 lines, removed 2 lines
+      57          res.status(400).json({ error: 'malformed message.inboun
+          d' });
+      58          return;
+      59        }
+      60 -      await timed('store', () => deps.store.storeInbound({     
+      60 +      const message = {                                        
+      61          workspace,
+      62          contact: data.from,
+      63          messageId: data.message_id,
+      64          text: typeof data.text === 'string' ? data.text : '',
+      65          occurredAt,
+      66          eventId: event.id,
+      67 -      }));                                                     
+      67 +      };                                                       
+      68 +      await timed('store', () => deps.store.storeInbound(messag
+         +e));                                                           
+      69        res.status(200).json({ ok: true });
+      70        return;
+      71      }
+
+  No result recorded for 1 call (ctrl+o to expand)
+  ⎿  $ $env:Path += ";C:\Users\HP\AppData\Local\Programs\DockerDesktop\resources\bin"; Set-Location C:\Users\HP\Downloads\starter\starter; docker compose -f docker-compose.dev.yml exec -T dev sh -c "cd scaffold/server && npm run typecheck 2>&1 | tail -3; npm test 2>&1 | grep -E '^# (pass|fail)'; rm -rf …
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ Stop the ack_speed investigation now, leave the code as it is (including the  
+  timing code if it's behind a flag, otherwise remove it). It passed on the     
+  rerun and I can't spend more time on it.                                      
+                                                                                
+  Change of plan: skip steps 3, 4 and 5 (login, WebSocket, UI) for now. All I   
+  want from you right now is step 2 done well, because outbound sending is      
+  where most of the check points are.                                           
+                                                                                
+  Delete dev-ack-probe.sh and move the two .mjs probes to scripts/dev/. Commit  
+  that.                                                                         
+                                                                                
+  Then build the outbox:                                                        
+  - Reply endpoint writes a queued row with a unique client_ref and returns     
+  202, even if two requests arrive at the same time.                            
+  - Worker picks up queued rows with a lease, sends to Pigeon with              
+  Idempotency-Key set to client_ref, and retries with the same key if Pigeon    
+  doesn't answer in about 3 seconds.                                            
+  - Rate limit and the Retry-After cool-off live in Redis, shared per           
+  workspace, so several copies of the server respect them together. Back off    
+  during an outage and cap the backoff at a few seconds.                        
+  - Status webhooks update the row by client_ref and only ever move forward     
+  (queued, sent, delivered, failed), even if they arrive before the slow        
+  response.                                                                     
+  - A row whose lease has expired gets picked up by any copy.                   
+                                                                                
+  Keep it simple and don't add dependencies. Tell me the idempotency key, the   
+  lease length and the timeout you chose. Think about two cases while writing   
+  it: the process dying right after the 202 but before Pigeon is called, and    
+  Pigeon accepting a message but answering after our timeout and after the      
+  lease expired. Then run npm run check and paste the result. If the full check 
+  (levels 2 and 3) is quick enough to run, run that as well.                    
+
+● I'm dropping the ack investigation and keeping the timing code behind
+  SB_TIMING=1, since it costs one boolean check when off. The pigeon.ts
+  typecheck fix was already applied, so I'll verify it along with the rest next.
+  · summary
+  Ran 1 shell command (ctrl+o to expand)
+
+● Now step 2. First the data model: the outbound row gets an explicit state, a
+  lease fence token and an acceptance time.
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\domain\store.ts)
+  ⎿  Added 10 lines, removed 4 lines
+      34    pigeon_id: string | null;
+      35    created_at: Date;
+      36    updated_at: Date;
+      37 -  // outbox bookkeeping (used by the sender worker)            
+      38 -  attempts: number;                                            
+      39 -  next_attempt_at: Date;                                       
+      40 -  lease_until: Date;                                           
+      37 +  // Outbox bookkeeping, used only by the sender worker (outbox
+         +/worker.ts).                                                   
+      38 +  // `status` is what the customer-facing lifecycle says (from 
+         +Pigeon's webhooks);                                            
+      39 +  // `state` is whether Pigeon has taken the message yet, and i
+         +s what the worker acts on.                                     
+      40 +  state: 'pending' | 'accepted' | 'dead';                      
+      41 +  accepted_at: Date | null;                                    
+      42 +  attempts: number; // failed attempts so far; drives the backo
+         +ff                                                             
+      43 +  next_attempt_at: Date; // not before this time               
+      44 +  lease_until: Date; // another copy may take the row once this
+         + has passed                                                    
+      45 +  lease_token: string | null; // identifies the current holder;
+         + fences stale completions                                      
+      46 +  last_error: string | null;                                   
+      47  }
+      48 
+      49  export const cols = {
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\domain\store.ts)
+  ⎿  Added 1 line, removed 1 line
+      66      c.conversations.createIndex({ workspace: 1, contact: 1 }, {
+           unique: true }),
+      67      c.conversations.createIndex({ workspace: 1, last_activity:
+          -1 }),
+      68      c.outbound.createIndex({ workspace: 1, client_ref: 1 }, { u
+          nique: true }),
+      69 -    c.outbound.createIndex({ status: 1, next_attempt_at: 1 }), 
+      69 +    c.outbound.createIndex({ workspace: 1, state: 1, next_attem
+         +pt_at: 1, lease_until: 1 }),                                   
+      70    ]);
+      71    await getRedis().ping();
+      72  }
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\domain\store.ts)
+  ⎿  Added 3 lines
+      151        { workspace, client_ref: clientRef, status: { $in: LOWER
+           [status] } },
+      152        { $set: { status, updated_at: now, ...(pigeonId ? { pige
+           on_id: pigeonId } : {}) } },
+      153      );
+      154 +    // Any status webhook proves Pigeon already has the messag
+          +e (it can arrive                                              
+      155 +    // before the slow HTTP response does), so the worker must
+          + stop retrying it.                                            
+      156 +    await outbound.updateOne({ workspace, client_ref: clientRe
+          +f, state: 'pending' }, { $set: { state: 'accepted', accepted_a
+          +t: now, lease_token: null } });                               
+      157      if (moved.matchedCount === 1) return true;
+      158      // Not moved: either it is already at or past this status 
+           (fine), or it does not exist.
+      159      return (await outbound.countDocuments({ workspace, client_
+           ref: clientRef }, { limit: 1 })) === 1;
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\domain\conversations.ts
+        )
+  ⎿  Added 4 lines
+      31        pigeon_id: null,
+      32        created_at: now,
+      33        updated_at: now,
+      34 +      state: 'pending',                                        
+      35 +      accepted_at: null,                                       
+      36        attempts: 0,
+      37        next_attempt_at: now,
+      38        lease_until: new Date(0),
+      39 +      lease_token: null,                                       
+      40 +      last_error: null,                                        
+      41      });
+      42      return 'created';
+      43    } catch (err) {
+
+● Now the config values, the Redis limiter, and the Pigeon client.
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\config.ts)
+  ⎿  Added 15 lines
+      25    },
+      26    // The businesses this deployment serves (each has a Pigeon k
+          ey above).
+      27    workspaces: ['ws_acme', 'ws_globex'] as string[],
+      28 +  outbox: {                                                    
+      29 +    // One attempt at Pigeon gives up after this long. Pigeon's
+         + slow path answers after                                       
+      30 +    // 12 s, so we will always time out on it and rely on the I
+         +dempotency-Key to retry.                                       
+      31 +    attemptTimeoutMs: Number(env('OUTBOX_ATTEMPT_TIMEOUT_MS', '
+         +3000')),                                                       
+      32 +    // A claimed row is ours for this long. It must outlast one
+         + attempt (3 s) with margin,                                    
+      33 +    // and be short enough that a dead copy's rows are re-taken
+         + well inside 60 s.                                             
+      34 +    leaseMs: Number(env('OUTBOX_LEASE_MS', '10000')),          
+      35 +    pollMs: Number(env('OUTBOX_POLL_MS', '150')),              
+      36 +    maxInflightPerWorkspace: Number(env('OUTBOX_MAX_INFLIGHT', 
+         +'4')),                                                         
+      37 +    backoffBaseMs: Number(env('OUTBOX_BACKOFF_BASE_MS', '500'))
+         +,                                                              
+      38 +    backoffCapMs: Number(env('OUTBOX_BACKOFF_CAP_MS', '5000')),
+      39 +    // Pigeon allows a burst of 8 refilling at 4/s per workspac
+         +e. We stay just under it.                                      
+      40 +    bucketCapacity: Number(env('OUTBOX_BUCKET_CAPACITY', '7')),
+      41 +    bucketRefillPerSec: Number(env('OUTBOX_BUCKET_REFILL', '3.5
+         +')),                                                           
+      42 +  },                                                           
+      43    oidc: {
+      44      issuer: env('OIDC_ISSUER', 'http://localhost:4020'),
+      45      clientId: env('OIDC_CLIENT_ID', 'switchboard-web'),
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\outbox\limiter.ts)
+  ⎿  Wrote 62 lines to
+     ~\Downloads\starter\starter\scaffold\server\src\outbox\limiter.ts
+       1 import type { Redis } from 'ioredis';
+       2 
+       3 // Per-workspace send budget shared by every copy of the server,
+          kept in Redis.
+       4 //
+       5 //   sb:rl:<ws>    token bucket (hash: tokens, ts)
+       6 //   sb:cool:<ws>  exists while Pigeon told us to wait (Retry-Af
+         ter); its TTL is the wait
+       7 //
+       8 // One Lua script does the whole step, so two copies can never b
+     … +55 lines (~2 KB) (ctrl+o to expand)
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\outbox\pigeonClient.ts)
+  ⎿  Wrote 56 lines to
+     ~\Downloads\starter\starter\scaffold\server\src\outbox\pigeonClient.ts
+       1 import { config } from '../config.js';
+       2 
+       3 export interface SendRequest {
+       4   workspace: string;
+       5   to: string;
+       6   text: string;
+       7   clientRef: string;
+       8 }
+       9 
+      10 // What happened, in the only terms the worker cares about.
+     … +46 lines (ctrl+o to expand)
+
+● Now the worker. It takes its Pigeon client, limiter and clock as inputs, so
+  both of your cases can be tested without a real network or real waiting.
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\outbox\worker.ts)
+  ⎿  Wrote 168 lines to
+     ~\Downloads\starter\starter\scaffold\server\src\outbox\worker.ts
+       1 import { randomUUID } from 'node:crypto';
+       2 import type { WithId } from 'mongodb';
+       3 import { collections, type OutboundDoc } from '../domain/store.j
+         s';
+       4 import type { Limiter } from './limiter.js';
+       5 import { idempotencyKeyFor, type SendFn, type SendResult } from
+         './pigeonClient.js';
+       6 
+       7 // The outbox worker: moves replies from "stored in MongoDB" to 
+         "accepted by Pigeon".
+     … +161 lines (ctrl+o to expand)
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\index.ts)
+  ⎿  Added 10 lines
+      20    for (;;) {
+      21      try {
+      22        await initStore();
+      23 +      createOutboxWorker({                                     
+      24 +        send: sendViaPigeon,                                   
+      25 +        limiter: createLimiter(getRedis(), { capacity: config.o
+         +utbox.bucketCapacity, refillPerSec: config.outbox.bucketRefillP
+         +erSec }),                                                      
+      26 +        workspaces: config.workspaces,                         
+      27 +        leaseMs: config.outbox.leaseMs,                        
+      28 +        pollMs: config.outbox.pollMs,                          
+      29 +        maxInflightPerWorkspace: config.outbox.maxInflightPerWo
+         +rkspace,                                                       
+      30 +        backoffBaseMs: config.outbox.backoffBaseMs,            
+      31 +        backoffCapMs: config.outbox.backoffCapMs,              
+      32 +      }).start();                                              
+      33        ready = true;
+      34        console.log('ready');
+      35        return;
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\index.ts)
+  ⎿  Added 4 lines
+       2  import { createApp } from './app.js';
+       3  import { config } from './config.js';
+       4  import { initStore, mongoStore } from './domain/store.js';
+       5 +import { createLimiter } from './outbox/limiter.js';           
+       6 +import { sendViaPigeon } from './outbox/pigeonClient.js';      
+       7 +import { createOutboxWorker } from './outbox/worker.js';       
+       8 +import { getRedis } from './redis.js';                         
+       9  import { startTimingReport } from './timing.js';
+      10 
+      11  startTimingReport(); // no-op unless SB_TIMING=1
+
+● Next I'll write the tests covering both cases: the process dying after the 202
+  but before Pigeon is called, and Pigeon answering late, after our timeout and
+  lease expiry. · summary
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\outbox\worker.test.ts)
+  ⎿  Wrote 218 lines to
+     ~\Downloads\starter\starter\scaffold\server\src\outbox\worker.test.ts
+       1 import assert from 'node:assert/strict';
+       2 import { createServer } from 'node:http';
+       3 import type { AddressInfo } from 'node:net';
+       4 import { after, before, beforeEach, test } from 'node:test';
+       5 
+       6 // Integration tests against the real MongoDB and Redis, in thei
+         r own database. A fake
+       7 // Pigeon (an HTTP server that honours Idempotency-Key, like the
+          real one) stands in
+       8 // for the provider. Skipped when MongoDB is unreachable.
+     … +210 lines (ctrl+o to expand)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Typecheck is clean and all 29 tests pass: the 15 new ones are the limiter, the
+  worker and your two cases, and the other 14 are step 1's. Now the check,
+  level 1 first.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Level 1 scored 24 of 24, so I'm committing that before running the full check,
+  which takes about 4–5 minutes. I expect level 5 to score 0, since I'm
+  skipping its login and WebSocket for now. · summary
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+❯ do it in background                                                           
+
+❯ these full check and all so I can write my next thing that I want you to do.  
+  these thing can run in the background.                                        
+
+● The full check had already finished, so nothing is running. From now on I'll
+  run check and check:full in the background and report back when they're done,
+  and I'm committing the report now. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Step 2 is done and committed. Levels 1, 2 and 3 score 60 of 60, and level 5
+  scores 0 of 15 because login and the WebSocket aren't built.
+
+  Check results
+
+  ┌───────┬───────┬──────────────────────────────────────────────────────────┐
+  │ Level │ Score │                          Notes                           │
+  ├───────┼───────┼──────────────────────────────────────────────────────────┤
+  │ 1     │ 24/24 │ npm run check alone also gave 24/24, and ack_speed       │
+  │       │       │ passed both times (p95 110 ms and 154 ms)                │
+  ├───────┼───────┼──────────────────────────────────────────────────────────┤
+  │ 2     │ 14/14 │ killed at 10 s, 175 of 175 inbound stored; 12 of 12      │
+  │       │       │ accepted replies delivered once after the restart        │
+  ├───────┼───────┼──────────────────────────────────────────────────────────┤
+  │ 3     │ 22/22 │ 2 copies; 24 of 24 sends once each; a copy killed for    │
+  │       │       │ good, and 12 of 12 replies still delivered within 60 s   │
+  ├───────┼───────┼──────────────────────────────────────────────────────────┤
+  │ 5     │ 0/15  │ /auth/login and /api/me return 404 because the login,    │
+  │       │       │ API and WebSocket work was skipped on purpose            │
+  └───────┴───────┴──────────────────────────────────────────────────────────┘
+
+  The full run scored 60 of 75. CHECK_REPORT.json is committed at 3f372f6, but
+  it will be overwritten by the final run, so don't treat it as the submission
+  copy.
+
+  What I chose
+
+  - Idempotency-Key: sb-<client_ref>. It depends only on the reply, never on the
+    attempt, the copy or the time. Every retry from any copy, before or after a
+    crash, sends the same key, so Pigeon returns its original answer instead of
+    sending again.
+  - Attempt timeout: 3 s. Pigeon's slow path answers after 12 s, so we always
+    time out on it and retry with the same key. The retry gets an instant
+    replay.
+  - Lease: 10 s.
+    - It has to outlast one attempt (3 s) with margin, so a healthy copy never
+      loses its row mid-send.
+    - It also has to be short enough that a dead copy's rows are retaken well
+      inside the 60 s limit.
+    - The measured cost is that after a kill -9, a row that was in flight waits
+      up to 10 s. Both level 2 and level 3 recovered inside that.
+  - Backoff: 0.5 s, 1 s, 2 s, 4 s, then 5 s, with ±20% jitter and a hard cap.
+    During the 8 s outage the check counted 25–26 requests, against a penalty
+    threshold of 48.
+  - Rate limit: a bucket of 7 refilling at 3.5 per second per workspace, just
+    under Pigeon's 8 and 4. It sits in Redis and one Lua script does the whole
+    step, so copies can't both spend the last token. A 429 sets a shared
+    cool-off in Redis for the Retry-After plus 250 ms. It is never triggered in
+    practice, because the bucket keeps us below Pigeon's limit.
+
+  Your two cases
+
+  - Dying after the 202, before Pigeon is called: the row is already in Mongo
+    and still pending, so any copy sends it. A copy that dies after claiming the
+    row but before sending has its row retaken only once the lease expires.
+    These are tests case 1a and case 1b.
+  - Pigeon accepts, but answers after our timeout and after the lease:
+    - The retry carries the same key, so Pigeon replays its answer and nothing
+      is sent twice (case 2a, a real HTTP server with the real client).
+    - If the stale answer finally arrives after another copy finished, nothing
+      doubles or reverts (case 2b).
+    - If a stale failure arrives, it can't overwrite the copy that now holds the
+      row, because writes that give a row up are checked against a per-claim
+      token (case 2c).
+    - Success is the one write I deliberately don't check against the lease,
+      because Pigeon gives both copies the same answer.
+
+  Weak spots to know about
+
+  - Clock: lease times use each server's clock. All copies share one machine
+    here, so that's fine, but across machines clock skew would matter.
+  - Redis down: the worker sends nothing, because it can't see the rate limit.
+    Replies stay safe in Mongo and go out when Redis returns.
+  - Permanent failure: a 400 from Pigeon marks the reply dead and failed and
+    stops. A 401 (wrong API key) keeps retrying at the 5 s cap, in case someone
+    fixes the key.
+  - DECISIONS.md: it doesn't yet describe the outbox, and still says sends
+    aren't built. I'll update it with the next step.
+
+  What's next is yours to say. The remaining points are login, /api/*, the
+  WebSocket and the UI, which cover level 5 (15 points), the frontend score and
+  the rest of the review points.
+
+✻ Worked for 9m 46s · done 7:31 PM
+● Autocompact unchanged · /autocompact to change it
+
+❯ Great result. Before anything else, secure what we have. My GitHub repo is    
+  https://github.com/amitkhairwal/Switchboard.git (empty). Update DECISIONS.md  
+  so it describes the outbox you built (idempotency key, 3 s timeout, 10 s      
+  lease, backoff, rate limit, the weak spots you listed) and says that login,   
+  the API and the WebSocket are not built yet. Commit, add the remote, push,    
+  and tell me the commit id.                                                    
+                                                                                
+  Then build level 5 as small as you can, in this order: login with OIDC (state 
+  and PKCE kept in Redis so any copy can finish a login another copy started,   
+  sessions in Redis), /api/me and /api/conversations with the workspace         
+  isolation rules (401 without a session, never show another workspace's data), 
+  then the /ws endpoint with live events and the after= replay. For the         
+  WebSocket seq order, use the single Lua script idea from your plan (INCR and  
+  XADD together) so frames are never out of order across copies. Skip the React 
+  UI entirely, I'll decide about it later.                                      
+                                                                                
+  Don't run npm run check after every step, it takes too long. Between steps    
+  use only the typecheck and the unit tests. Run npm run check once, at the     
+  very end of level 5, and paste the result. If something in level 5 fails, fix 
+  only that, don't touch outbox code. Commit and push when it works, and give   
+  me the commit id.                                                             
+
+● First I'm updating DECISIONS.md to match what's built, then pushing it.
+
+● Write(~\Downloads\starter\starter\DECISIONS.md)
+  ⎿  Added 51 lines, removed 7 lines
+       2 
+       3  Work in progress; kept up to date as the build goes on.
+       4 
+       5 +## Built so far                                                
+       6 +                                                               
+       7 +- **Webhook** `POST /webhooks/pigeon`: raw-body HMAC check, fiv
+         +e-minute window, the answer table                              
+       8 +  of PIGEON.md, idempotent storage of inbound messages (unique 
+         +`(workspace, message_id)`).                                    
+       9 +- **Grader endpoints** (`/__grader/*`): token guard, reset, sna
+         +pshot, reply, claim.                                           
+      10 +- **Outbox** (replies to customers), described below.          
+      11 +- **Not built yet:** login (OIDC), `/api/*`, the WebSocket and 
+         +the React app. Until they exist,                               
+      12 +  level 5 of the check scores 0.                               
+      13 +                                                               
+      14  ## Cut on purpose
+      15 
+      16  - **Encrypted private notes (and `PROTOCOL.md`): cut.** A half-
+          finished end-to-end
+     ...
+      18    actually give. Agents therefore have no private notes in this
+           version.
+      19  - **Search (Elasticsearch) and billing (Paybox): cut.** Not sta
+          rted.
+      20 
+      21 +## The outbox (how a reply gets to the customer)               
+      22 +                                                               
+      23 +A reply is written to MongoDB first (`outbound`, unique on `(wo
+         +rkspace, client_ref)`), and only then                          
+      24 +does the endpoint answer `202`. A worker in every copy of the s
+         +erver sends it afterwards.                                     
+      25 +                                                               
+      26 +- **Idempotency-Key = `sb-<client_ref>`.** It depends on the re
+         +ply only, never on the attempt, the                            
+      27 +  copy or the time, so every retry (after a timeout, a crash, o
+         +r by another copy) carries the same                            
+      28 +  key and Pigeon returns its original answer instead of sending
+         + again.                                                        
+      29 +- **Attempt timeout: 3 s.** Pigeon's slow path answers after 12
+         + s, so on those we always time out,                            
+      30 +  retry with the same key, and get an instant replay.          
+      31 +- **Lease: 10 s.** A worker claims a row with one atomic `findO
+         +neAndUpdate` (state `pending`, due,                            
+      32 +  lease expired) and holds it for 10 s: longer than one attempt
+         +, shorter than the 60 s a dead copy                            
+      33 +  has to be covered in. Cost: after a `kill -9`, an in-flight r
+         +ow waits up to 10 s. Any copy takes a                          
+      34 +  row whose lease has expired. Writes that give a row up (retry
+         +, release) are fenced by a per-claim                           
+      35 +  `lease_token`, so a copy that lost its lease cannot overwrite
+         + the copy that now holds it. A success is                      
+      36 +  recorded by whoever reports it, since Pigeon gives both the s
+         +ame answer.                                                    
+      37 +- **Backoff:** 0.5 s, 1 s, 2 s, 4 s, then 5 s, +/-20 % jitter, 
+         +capped. During the 8 s provider outage                         
+      38 +  the check saw about 25 requests (the penalty starts at 48).  
+      39 +- **Rate limit:** a token bucket per workspace in Redis (7 toke
+         +ns, refill 3.5/s: just under Pigeon's                          
+      40 +  8 and 4/s), one Lua script so two copies cannot both take the
+         + last token. A `429` sets a shared                             
+      41 +  cool-off key for the `Retry-After` plus 250 ms. The worker pe
+         +eks before it claims and takes the token                       
+      42 +  after claiming, so a token is never wasted on a row another c
+         +opy won.                                                       
+      43 +- **Status webhooks** update the row by `client_ref` and only m
+         +ove forward                                                    
+      44 +  (`queued < sent < delivered = failed`). Any status also marks
+         + the row accepted, because it can arrive                       
+      45 +  before the slow HTTP response, and the worker must then stop 
+         +retrying.                                                      
+      46 +- **Permanent failure:** Pigeon `400` marks the reply `dead` an
+         +d `failed`. A `401` keeps retrying at the                      
+      47 +  5 s cap in case somebody fixes the key.                      
+      48 +                                                               
+      49  ## Assumptions where the brief is silent
+      50 
+      51  - **Workspaces are fixed:** `ws_acme` and `ws_globex` (`config.
+          workspaces`), the two
+     ...
+      54    "a body you cannot parse" is `400`; I read "cannot make sense
+           of" the same way for
+      55    `message.inbound` with no `message_id`/`from`/valid `occurred
+          _at`. Unknown types,
+      56    unknown workspaces and statuses for messages we never sent ar
+          e `2xx` and ignored.
+      57 +  This is a judgement call on a case the documents do not spell
+         + out.                                                          
+      58  - **Signature window:** `|now - t| <= 300 s` is genuine (future
+           timestamps within the
+      59    same window too). The MAC is checked before the timestamp, so
+           a forger learns nothing
+      60    from the difference between "bad" and "stale"; both are `401`
+          .
+     ...
+      62    event, so Pigeon must retry it. Bad input never produces a `5
+          xx`.
+      63  - **Order of a conversation** is `occurred_at` then `message_id
+          ` (Pigeon's own truth
+      64    order), never arrival order.
+      27 -- **Message status only moves forward:** `queued < sent < deliv
+         -ered = failed`. A                                              
+      28 -  late `sent` cannot undo `delivered`.                         
+      65  - **Claim lives in MongoDB, not Redis:** one conditional update
+           on the conversation
+      66    document (`assignee` is null or me). It is the same durable r
+          ecord the snapshot and
+      67    API read, so it survives a Redis restart and needs no second
+          system to agree with.
+     ...
+      75  Mongo, Redis, Pigeon and the IdP share the dev container's netw
+          ork, so every
+      76  default `localhost` URL is unchanged.
+      77 
+      42 -## What I know is still wrong / not done yet                   
+      78 +## What I know is still wrong                                  
+      79 
+      44 -- Step 1 only: webhooks, claim, reply *enqueue*, snapshot. Repl
+         -ies are stored as                                              
+      45 -  `queued` but nothing sends them yet (outbox worker, rate limi
+         -t, outage handling                                             
+      46 -  come next), so the three send checks in level 1 fail for now.
+      47 -- Login, `/api/*`, WebSocket and the React app are not built ye
+         -t.                                                             
+      80 +- **Level 5 and the product around it are missing:** no login, 
+         +no `/api/*`, no WebSocket, no UI.                              
+      81 +  A reviewer cannot use this as an inbox yet.                  
+      82 +- **Clocks:** leases are compared with each server's own clock.
+         + Fine on one machine; across machines,                         
+      83 +  clock skew would let a lease look expired early or late.     
+      84 +- **Redis down:** the worker sends nothing (it cannot see the r
+         +ate limit, and sending blind would break                       
+      85 +  Pigeon's limit). Replies stay safe in MongoDB and go out when
+         + Redis is back. Rate-limit and cool-off                        
+      86 +  state is lost on a Redis restart (the bucket starts full), at
+         + worst costing one `429` and a fresh                           
+      87 +  cool-off. Sessions would be lost too.                        
+      88 +- **After a `kill -9`** a row that was mid-send waits up to the
+         + 10 s lease before another try.                                
+      89 +- **One slow-start observation:** in one early run `ack_speed` 
+         +failed (p95 4.7 s) and passed on every                         
+      90 +  run since; I could not reproduce it in two attempts and did n
+         +ot find the cause. Stage timing code                           
+      91 +  stays in behind `SB_TIMING=1`.                               
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The push is waiting, probably on a GitHub credential prompt. I'll check its
+  output, then start level 5 while it waits.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The push is blocked on GitHub sign-in, so I'm building level 5 meanwhile,
+  starting with the event bus, which assigns seq and appends it in one atomic
+  Lua script. · summary
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\events\bus.ts)
+  ⎿  Wrote 126 lines to
+     ~\Downloads\starter\starter\scaffold\server\src\events\bus.ts
+       1 import { Redis } from 'ioredis';
+       2 import { config } from '../config.js';
+       3 import { getRedis } from '../redis.js';
+       4 
+       5 // The real-time event bus: one Redis Stream per workspace, shar
+         ed by every copy.
+       6 //
+       7 //   sb:seq:<ws>   counter. The `seq` in every frame. Survives /
+         __grader/reset so it only goes up.
+       8 //   sb:ev:<ws>    the stream. Entry id is "<seq>-0", so stream 
+     … +119 lines (~5 KB) (ctrl+o to expand)
+
+● Background command "Commit DECISIONS, add the remote, push, show the commit
+  id" completed (exit code 0)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The push went through. origin/main is at
+  6f92a3b398e733a6f42c0cda95d96417092a7aff. Back to level 5, starting with login
+  and sessions.
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\auth\oidc.ts)
+  ⎿  Wrote 109 lines to
+     ~\Downloads\starter\starter\scaffold\server\src\auth\oidc.ts
+       1 import { createHash, randomBytes } from 'node:crypto';
+       2 import { createRemoteJWKSet, jwtVerify } from 'jose';
+       3 import { config } from '../config.js';
+       4 import { getRedis } from '../redis.js';
+       5 import type { Session } from './session.js';
+       6 
+       7 // OpenID Connect, authorization code flow with PKCE (S256).
+       8 //
+       9 // What a login needs between "send the browser to the IdP" and 
+         "the browser comes back"
+     … +100 lines (ctrl+o to expand)
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\auth\session.ts)
+  ⎿  Wrote 68 lines to
+     ~\Downloads\starter\starter\scaffold\server\src\auth\session.ts
+       1 import { randomBytes } from 'node:crypto';
+       2 import type { NextFunction, Request, Response } from 'express';
+       3 import { config } from '../config.js';
+       4 import { getRedis } from '../redis.js';
+       5 
+       6 // Sessions live in Redis (`sb:sess:<id>`), so any copy can serv
+         e any request. The cookie holds only
+       7 // a random 256-bit id: it carries no data and cannot be forged,
+          and deleting the Redis key
+       8 // logs the user out everywhere at once.
+     … +60 lines (ctrl+o to expand)
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\auth\routes.ts)
+  ⎿  Wrote 39 lines to
+     ~\Downloads\starter\starter\scaffold\server\src\auth\routes.ts
+       1 import { Router } from 'express';
+       2 import { wrap } from '../grader/routes.js';
+       3 import { AuthError, finishLogin, startLogin } from './oidc.js';
+       4 import { clearedCookie, createSession, destroySession, sessionCo
+         okie } from './session.js';
+       5 
+       6 export const authRouter = Router();
+       7 
+       8 authRouter.get('/login', wrap(async (_req, res) => {
+       9   res.redirect(302, await startLogin());
+     … +30 lines (ctrl+o to expand)
+
+● The login should land on the web app's origin, which is what WEB_ORIGIN is
+  for, so I'm changing the redirect. Then the API routes.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\api\routes.ts)
+  ⎿  Wrote 66 lines to
+     ~\Downloads\starter\starter\scaffold\server\src\api\routes.ts
+       1 import { Router, type Request, type Response } from 'express';
+       2 import { ObjectId } from 'mongodb';
+       3 import { requireSession, isMember, type Session } from '../auth/
+         session.js';
+       4 import { collections } from '../domain/store.js';
+       5 import { wrap } from '../grader/routes.js';
+       6 
+       7 export const apiRouter = Router();
+       8 apiRouter.use(requireSession); // 401 for every /api route witho
+         ut a session
+     … +58 lines (ctrl+o to expand)
+
+● Now the WebSocket endpoint.
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\ws.ts)
+  ⎿  Wrote 97 lines to
+     ~\Downloads\starter\starter\scaffold\server\src\ws.ts
+       1 import type { IncomingMessage, Server } from 'node:http';
+       2 import type { Duplex } from 'node:stream';
+       3 import { WebSocket, WebSocketServer } from 'ws';
+       4 import { config } from './config.js';
+       5 import { isMember, loadSession } from './auth/session.js';
+       6 import { currentSeq, readSince, subscribe, type Frame } from './
+         events/bus.js';
+       7 
+       8 // GET /ws?workspace=<id>[&after=<seq>]
+       9 //
+     … +88 lines (ctrl+o to expand)
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\app.ts)
+  ⎿  Added 2 lines
+      38 
+      39    app.use(express.json({ limit: '1mb' }));
+      40    app.use('/__grader', graderRouter);
+      41 +  app.use('/auth', authRouter);                                
+      42 +  app.use('/api', apiRouter);                                  
+      43 
+      44    // Last resort. A storage failure on the webhook is a 5xx ON 
+          PURPOSE: Pigeon must
+      45    // retry, because we did not store the event. Bad input never
+           reaches here.
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\app.ts)
+  ⎿  Added 2 lines
+      1  import express, { type NextFunction, type Request, type Response
+          } from 'express';
+      2  import { config } from './config.js';
+      3 +import { apiRouter } from './api/routes.js';                    
+      4 +import { authRouter } from './auth/routes.js';                  
+      5  import { graderRouter } from './grader/routes.js';
+      6  import type { PigeonStore } from './domain/store.js';
+      7  import { createPigeonHandler } from './webhooks/pigeon.js';
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\index.ts)
+  ⎿  Added 1 line, removed 1 line
+      14 
+      15  process.on('unhandledRejection', (e) => console.error('unhandle
+          dRejection', e));
+      16 
+      17 -// A plain http server, so WebSockets can attach to it later.  
+      17  const server = createServer(app);
+      18 +attachWebSocket(server); // GET /ws                            
+      19  server.listen(config.port, () => {
+      20    console.log(`server on http://localhost:${config.port}`);
+      21  });
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\index.ts)
+  ⎿  Added 1 line
+      24    for (;;) {
+      25      try {
+      26        await initStore();
+      27 +      startEventReaders(config.workspaces); // fan out events p
+         +ublished by any copy to this copy's sockets                    
+      28        createOutboxWorker({
+      29          send: sendViaPigeon,
+      30          limiter: createLimiter(getRedis(), { capacity: config.o
+          utbox.bucketCapacity, refillPerSec: config.outbox.bucketRefillP
+          erSec }),
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\index.ts)
+  ⎿  Added 2 lines
+      2  import { createApp } from './app.js';
+      3  import { config } from './config.js';
+      4  import { initStore, mongoStore } from './domain/store.js';
+      5 +import { startEventReaders } from './events/bus.js';            
+      6 +import { attachWebSocket } from './ws.js';                      
+      7  import { createLimiter } from './outbox/limiter.js';
+      8  import { sendViaPigeon } from './outbox/pigeonClient.js';
+      9  import { createOutboxWorker } from './outbox/worker.js';
+
+  Read 1 file (ctrl+o to expand)
+● Now publishing events from the places that change state, and a reset that
+  keeps the seq counters, so a reset can't make seq go backwards under connected
+  clients.
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\domain\store.ts)
+  ⎿  Added 11 lines, removed 3 lines
+      141      // Runs even for a duplicate: if a crash hit between the t
+           wo writes the first
+      142      // time, Pigeon's retry repairs the conversation row.
+      143      await timed('mongo.conversation', () => ensureConversation
+           (m.workspace, m.contact, m.occurredAt));
+      144 +    // Published on every delivery, not only the first: the ma
+          +rker (key "in:<id>") makes it once-only, and                  
+      145 +    // it means a crash after the write but before this line i
+          +s repaired by Pigeon's retry. If Redis is                     
+      146 +    // down this throws, the webhook answers 503, and Pigeon r
+          +etries.                                                       
+      147 +    await publish(m.workspace, { type: 'message.inbound', cont
+          +act: m.contact, message_id: m.messageId, text: m.text, occurre
+          +d_at: m.occurredAt.toISOString() }, `in:${m.messageId}`);     
+      148      return inserted;
+      149    },
+      150 
+      151    async applyStatus(workspace, clientRef, status, pigeonId) {
+      152      const { outbound } = await collections();
+      153      const now = new Date();
+      150 -    const moved = await outbound.updateOne(                   
+      154 +    const moved = await outbound.findOneAndUpdate(            
+      155        { workspace, client_ref: clientRef, status: { $in: LOWER
+           [status] } },
+      156        { $set: { status, updated_at: now, ...(pigeonId ? { pige
+           on_id: pigeonId } : {}) } },
+      157 +      { returnDocument: 'after' },                            
+      158      );
+      159      // Any status webhook proves Pigeon already has the messag
+           e (it can arrive
+      160      // before the slow HTTP response does), so the worker must
+            stop retrying it.
+      161      await outbound.updateOne({ workspace, client_ref: clientRe
+           f, state: 'pending' }, { $set: { state: 'accepted', accepted_a
+           t: now, lease_token: null } });
+      157 -    if (moved.matchedCount === 1) return true;                
+      162      // Not moved: either it is already at or past this status 
+           (fine), or it does not exist.
+      159 -    return (await outbound.countDocuments({ workspace, client_
+          -ref: clientRef }, { limit: 1 })) === 1;                       
+      163 +    const row = moved ?? (await outbound.findOne({ workspace, 
+          +client_ref: clientRef }));                                    
+      164 +    if (!row) return false;                                   
+      165 +    // Same repair-by-retry rule as above: announce the status
+          + the row has reached, once.                                   
+      166 +    if (row.status === status) await publish(workspace, { type
+          +: 'message.status', contact: row.contact, client_ref: clientRe
+          +f, status }, `st:${clientRef}:${status}`);                    
+      167 +    return true;                                              
+      168    },
+      169  };
+      170 
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\domain\store.ts)
+  ⎿  Added 3 lines, removed 1 line
+      179    do {
+      180      const [next, keys] = await redis.scan(cursor, 'MATCH', 'sb
+           :*', 'COUNT', 200);
+      181      cursor = next;
+      182 -    const doomed = keys.filter((k) => !k.startsWith('sb:sess:'
+          -) && !k.startsWith('sb:oidc:')); // sessions may stay         
+      182 +    // Sessions and login attempts may stay. The seq counters 
+          +must stay too: frames carry a number that only                
+      183 +    // goes up, and connected browsers would otherwise see it 
+          +jump back. (The frames themselves, sb:ev:*, go.)              
+      184 +    const doomed = keys.filter((k) => !k.startsWith('sb:sess:'
+          +) && !k.startsWith('sb:oidc:') && !k.startsWith('sb:seq:'));  
+      185      if (doomed.length) await redis.del(...doomed);
+      186    } while (cursor !== '0');
+      187  }
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\domain\store.ts)
+  ⎿  Added 1 line
+      1  import type { Collection, Db } from 'mongodb';
+      2  import { getDb } from '../db.js';
+      3 +import { publish } from '../events/bus.js';                     
+      4  import { getRedis } from '../redis.js';
+      5  import { timed } from '../timing.js';
+      6 
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\domain\conversations.ts
+        )
+  ⎿  Added 6 lines
+      11      { workspace, contact, assignee: { $in: [null, agent] } }, /
+          / free, or already mine
+      12      { $set: { assignee: agent, status: 'open' } },
+      13    );
+      14 +  // The holder claiming again changes nothing, so it announces
+         + nothing. A failed announcement must not                       
+      15 +  // turn a claim that already happened into an error (the agen
+         +t would retry and get 200 with no event):                      
+      16 +  // it is logged, and the conversation list stays correct beca
+         +use it is read from MongoDB.                                   
+      17 +  if (r.modifiedCount === 1) {                                 
+      18 +    await publish(workspace, { type: 'conversation.assigned', c
+         +ontact, assignee: agent }).catch((e: Error) => console.error('a
+         +ssignment not announced:', e.message));                        
+      19 +  }                                                            
+      20    return r.matchedCount === 1; // 0 matched = someone else hold
+          s it -> 409
+      21  }
+      22 
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\domain\conversations.ts
+        )
+  ⎿  Added 1 line
+      1 +import { publish } from '../events/bus.js';                     
+      2  import { collections, ensureConversation, isDuplicateKey } from
+         './store.js';
+      3 
+      4  // Claim: ONE atomic conditional update in MongoDB, on the same 
+         document that
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Now the unit and integration tests for this layer: bus ordering, the login
+  flow against the real IdP, API isolation, and WebSocket live and replay.
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\events\bus.test.ts)
+  ⎿  Wrote 56 lines to
+     ~\Downloads\starter\starter\scaffold\server\src\events\bus.test.ts
+       1 import assert from 'node:assert/strict';
+       2 import { after, test } from 'node:test';
+       3 
+       4 process.env.MONGO_URL = (process.env.MONGO_URL ?? 'mongodb://loc
+         alhost:27017/switchboard').replace(/\/[^/]*$/, '') + '/switchboa
+         rd_test_bus';
+       5 const { publish, readSince, currentSeq } = await import('./bus.j
+         s');
+       6 const { resetAll } = await import('../domain/store.js');
+       7 const { getRedis } = await import('../redis.js');
+     … +49 lines (ctrl+o to expand)
+
+● Write(~\Downloads\starter\starter\scaffold\server\src\api\api.test.ts)
+  ⎿  Wrote 196 lines to
+     ~\Downloads\starter\starter\scaffold\server\src\api\api.test.ts
+       1 import assert from 'node:assert/strict';
+       2 import { createServer, type Server } from 'node:http';
+       3 import type { AddressInfo } from 'node:net';
+       4 import { after, before, test } from 'node:test';
+       5 import { WebSocket } from 'ws';
+       6 
+       7 // Login (against the real mock IdP), /api isolation and the Web
+         Socket, over real HTTP.
+       8 process.env.MONGO_URL = (process.env.MONGO_URL ?? 'mongodb://loc
+         alhost:27017/switchboard').replace(/\/[^/]*$/, '') + '/switchboa
+     … +189 lines (~11 KB) (ctrl+o to expand)
+
+● I left a junk line in the last test, so I'll remove it, then run the typecheck
+  and the unit tests (not the full check, as you asked).
+
+● Update(~\Downloads\starter\starter\scaffold\server\src\api\api.test.ts)
+  ⎿  Removed 2 lines
+      173  });
+      174 
+      175  test('ws: frames published while the replay is being sent are 
+           neither lost nor repeated', { skip: !available }, async () =>
+           {
+      176 -  const start = (await (await open(WS_A, cookieA)).frames.leng
+          -th, 0);                                                       
+      177 -  void start;                                                 
+      176    const probe = await open(WS_A, cookieA);
+      177    await publish(WS_A, { type: 'marker', n: -1 });
+      178    await wait(200);
+
+  Ran 1 shell command, no result recorded for 1 other call (ctrl+o to expand)
+  ⎿  $ $env:Path += ";C:\Users\HP\AppData\Local\Programs\DockerDesktop\resources\bin"; Set-Location C:\Users\HP\Downloads\starter\starter; docker compose -f docker-compose.dev.yml exec -T dev sh -c "cd scaffold/server && npm test 2>&1 | grep -E '^(not ok|ok)|^# (tests|pass|fail|skipped)|error:|expected|…
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ Stop level 5, leave any half-written login or WebSocket code out of the       
+  commit if it breaks the build (make sure typecheck still passes and the       
+  server still starts). Priority now is to get what we have onto GitHub.        
+                                                                                
+  1. Update DECISIONS.md: describe the outbox (idempotency key, 3 s timeout, 10 
+  s lease, backoff, Redis rate limit), the cuts (encrypted notes, search,       
+  billing, level 5 login/API/WebSocket/UI not built), and what is still weak or 
+  untested. Make sure README.md exists with install and start steps. No .env    
+  and no node_modules in the commit.                                            
+  2. Create an empty ai-logs/ folder with a .gitkeep file so it is in the repo. 
+  Don't write anything else in it. I'm going to export the AI session           
+  transcripts into it myself after you push. Don't edit or delete anything that 
+  ends up in that folder later.                                                 
+  3. Stop any dev server, then run npm run check (not the full one, there's no  
+  time) and commit CHECK_REPORT.json. Note in DECISIONS.md that only npm run    
+  check was run.                                                                
+  4. Add the remote https://github.com/amitkhairwal/Switchboard.git, commit and 
+  push to the main branch right now. Confirm the push went through and give me  
+  the full 40 character commit id.                                              
+
+● I'm shelving the unverified level 5 change in a local git stash, since it
+  touches paths the verified 60/60 depends on and was never run. Next I'll
+  confirm main holds the verified code. · summary
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Stashed the work, so main is back at the 60/60 code and matches origin. Next
+  I'm reading the README, ai-logs/ and DECISIONS.md. · summary
+
+● Write(~\Downloads\starter\starter\README.md)
+  ⎿  Couldn't write file
+
+  Read 2 files, ran 1 shell command (ctrl+o to expand)
+
+● Write(~\Downloads\starter\starter\README.md)
+  ⎿  Added 19 lines, removed 1 line
+       1  # Switchboard
+       2 
+       3 -A shared team inbox (see `BRIEF.md`). Work in progress; `DECISI
+         -ONS.md` says what is built, cut and known wrong.               
+       3 +A shared team inbox (see `BRIEF.md`). **Unfinished:** the inbou
+         +nd/outbound message pipeline is built and checked;             
+       4 +login, `/api/*`, the WebSocket and the web app are not. `DECISI
+         +ONS.md` has the full list of what is built, cut and known weak.
+       5 
+       6 +## Run it from a clean clone                                   
+       7 +                                                               
+       8 +Needs Node 22, Docker, and the ports 4000, 4010, 4020, 27017, 6
+         +379 free.                                                      
+       9 +                                                               
+      10 +```                                                            
+      11 +npm run up                  # MongoDB, Redis, Pigeon (messaging
+         +), the mock IdP, in Docker                                     
+      12 +npm run doctor              # confirms every service answers   
+      13 +npm run scaffold:install    # installs the server (and the empt
+         +y web shell)                                                   
+      14 +npm run scaffold:server     # the server on http://localhost:40
+         +00   (npm run start:server for a plain run)                    
+      15 +npm run check               # level 1 of the check; stop the se
+         +rver above first, it starts its own                            
+      16 +npm run check:full          # levels 1, 2, 3 and 5 (about 4 min
+         +utes)                                                          
+      17 +```                                                            
+      18 +                                                               
+      19 +Configuration is read from the environment (see `.env.example`;
+         + the defaults match the Docker services, so no `.env` is needed
+         +).                                                             
+      20 +`switchboard.json` holds the install and start commands the che
+         +ck uses. Server tests: `npm --prefix scaffold/server test`     
+      21 +(they use their own MongoDB databases and need the services abo
+         +ve running).                                                   
+      22 +                                                               
+      23  ## Why `docker-compose.dev.yml` exists
+      24 
+      25  The check harness needs Linux (`sh`, killing a whole process gr
+          oup), and this was built on Windows.
+
+● Update(~\Downloads\starter\starter\DECISIONS.md)
+  ⎿  Added 7 lines, removed 2 lines
+       8    of PIGEON.md, idempotent storage of inbound messages (unique
+          `(workspace, message_id)`).
+       9  - **Grader endpoints** (`/__grader/*`): token guard, reset, sna
+          pshot, reply, claim.
+      10  - **Outbox** (replies to customers), described below.
+      11 -- **Not built yet:** login (OIDC), `/api/*`, the WebSocket and 
+         -the React app. Until they exist,                               
+      12 -  level 5 of the check scores 0.                               
+      11 +- **Not built:** login (OIDC), `/api/*`, the WebSocket and the 
+         +React app. Level 5 of the check                                
+      12 +  (15 points) therefore scores 0, and nobody can use this as an
+         + inbox yet: there is no way to sign in,                        
+      13 +  list conversations, read messages, claim or reply except thro
+         +ugh the `/__grader/*` endpoints.                               
+      14 +  I started level 5 (OIDC login with state and PKCE in Redis, s
+         +essions in Redis, `/api/me`,                                   
+      15 +  `/api/conversations`, `/ws` with an event stream and `after=`
+         + replay), but it was never run, so it is                       
+      16 +  **not in this repository**: I would not ship code I had not r
+         +un, and it changes the webhook path that                       
+      17 +  the passing checks rely on.                                  
+      18 
+      19  ## Cut on purpose
+      20 
+
+● Now I'll make sure nothing is running on port 4000, typecheck main, and run
+  npm run check in the background, writing the report with --out.
+
+  Ran 2 shell commands · 1 failed (ctrl+o to expand)
+
+● The pkill matched its own shell and exited 143, so the typecheck was skipped.
+  I'll rerun it on its own once the current check finishes. · summary
+
+  Ran 1 shell command · 1 failed (ctrl+o to expand)
+
+● The check is still running in the background and I'll get a notification when
+  it finishes. In the meantime I'm editing DECISIONS.md, which doesn't touch the
+  running check.
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(~\Downloads\starter\starter\DECISIONS.md)  ⎿  Added 2 lines, removed 1 line
+      83  ## What I know is still wrong
+      84 
+      85  - **Level 5 and the product around it are missing:** no login,
+          no `/api/*`, no WebSocket, no UI.
+      86 -  A reviewer cannot use this as an inbox yet.                  
+      86 +  A reviewer cannot use this as an inbox yet. Also not built: c
+         +lose/reopen, the inbox list and                                
+      87 +  message-reading endpoints for agents, tests of the web side (
+         +there is none).                                                
+      88  - **Clocks:** leases are compared with each server's own clock.
+           Fine on one machine; across machines,
+      89    clock skew would let a lease look expired early or late.
+      90  - **Redis down:** the worker sends nothing (it cannot see the r
+          ate limit, and sending blind would break
+
+● Update(~\Downloads\starter\starter\DECISIONS.md)
+  ⎿  Added 9 lines
+       92    state is lost on a Redis restart (the bucket starts full), a
+           t worst costing one `429` and a fresh
+       93    cool-off. Sessions would be lost too.
+       94  - **After a `kill -9`** a row that was mid-send waits up to th
+           e 10 s lease before another try.
+       95 +- **Untested, or only tested in one shape:**                  
+       96 +  - Level 4 (the private rules) cannot be run. I wrote tests f
+          +or ten cases I read out of PIGEON.md and the                  
+       97 +    brief; the real ones may include cases the documents do no
+          +t spell out.                                                  
+       98 +  - Only two copies of the server were ever run together; the 
+          +grading check uses three.                                     
+       99 +  - Redis going down or restarting mid-run, and MongoDB going 
+          +down, were reasoned about, not tested.                        
+      100 +  - The permanent-failure path (Pigeon `400`) and the `401` re
+          +try are covered by one unit test each, never                  
+      101 +    against a real misbehaving Pigeon.                        
+      102 +  - Nothing was tested on a real clock skew, a large backlog (
+          +hundreds of queued replies), or a long run.                   
+      103 +  - The 400-versus-2xx choice for a known event type with miss
+          +ing fields (above) is a guess.                                
+      104  - **One slow-start observation:** in one early run `ack_speed`
+            failed (p95 4.7 s) and passed on every
+      105    run since; I could not reproduce it in two attempts and did
+           not find the cause. Stage timing code
+      106    stays in behind `SB_TIMING=1`.
+
+● I'm waiting on the background check, which finishes in about a minute.
+  ⎿  Invalid tool parameters
+
+● The check is still running in the background. When its notification arrives
+  I'll typecheck, put the result in DECISIONS.md, commit and push, and give you
+  the full commit id.
+
+  So far:
+  - Shelved: the level 5 code is in a local stash (stash@{0}, restore with git 
+    stash pop). It is not in the repo.
+  - Prepared, not yet committed: README.md, ai-logs/.gitkeep and the
+    DECISIONS.md updates.
+  - Already pushed: origin/main is at 6f92a3b398e733a6f42c0cda95d96417092a7aff.
+
+✻ Baked for 1m 20s · done 7:47 PM
+
+● Background command "Run the level 1 check and write CHECK_REPORT.json"
+  completed (exit code 0)
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● The check scored 24 of 24, and the typecheck is clean with only the committed
+  code in src/. Last edit to DECISIONS.md is the note about which check was run,
+  and then I'll commit and push.
+
+● Update(~\Downloads\starter\starter\DECISIONS.md)
+  ⎿  Added 9 lines
+      16    **not in this repository**: I would not ship code I had not r
+          un, and it changes the webhook path that
+      17    the passing checks rely on.
+      18 
+      19 +## What was run                                                
+      20 +                                                               
+      21 +- **`CHECK_REPORT.json` is from `npm run check` only** (level 1
+         +, profile "quick"): 24 of 24. The full check                   
+      22 +  (`npm run check:full`, levels 1, 2, 3 and 5) was **not** run 
+         +for this final commit, for lack of time.                       
+      23 +- Before that, `check:full` was run once on an earlier commit (
+         +`3f372f6`, the same server code apart from                     
+      24 +  documentation): level 1 24/24, level 2 14/14, level 3 22/22 (
+         +two copies), level 5 0/15 (not built); 60 of 75.               
+      25 +  That report was overwritten by this one, but the numbers are 
+         +in the git history of `CHECK_REPORT.json`.                     
+      26 +- Server tests (`npm --prefix scaffold/server test`): 29 passin
+         +g at the last run.                                             
+      27 +                                                               
+      28  ## Cut on purpose
+      29 
+      30  - **Encrypted private notes (and `PROTOCOL.md`): cut.** A half-
+          finished end-to-end
+
+  Pushed to main (ctrl+o to expand)
+
+● The push went through. GitHub's main and your local HEAD are both at this
+  commit:
+
+  9f842d668c781561ab22c77d0d5f9a5142b66eff
+
+  What's in the repo
+
+  - Code: the verified version only, with webhooks, grader endpoints and outbox.
+    The typecheck is clean.
+  - CHECK_REPORT.json: from npm run check (level 1), 24 of 24. I didn't run the
+    full check, and DECISIONS.md says so. It also records that the earlier full
+    run scored 60 of 75 (levels 1–3 full marks, level 5 at 0).
+  - DECISIONS.md: covers the outbox (key sb-<client_ref>, 3 s timeout, 10 s
+    lease, backoff 0.5 s to 5 s, Redis rate limit). It lists the cuts (encrypted
+    notes, search, billing, and login, API, WebSocket and UI not built) and the
+    weak or untested spots.
+  - README.md: has the install and start steps.
+  - ai-logs/.gitkeep: empty, and I haven't touched anything else in that folder.
+  - Nothing sensitive: no .env, no node_modules and no check logs are tracked.
+
+  Things to know
+
+  - Level 5 code is shelved, not lost. It's in a local git stash on this machine
+    (stash@{0}). Run git stash pop to get it back; it was typechecked but never
+    run.
+  - Level 5 scores 0 of 15, so the project has no sign-in or inbox for a
+    reviewer to use yet.
+  - Report dropped on purpose: the 60 of 75 full-check report from 3f372f6 is
+    only in git history now. That is deliberate, and DECISIONS.md explains it.
+  - Transcripts: export them into ai-logs/ yourself, and the brief says that
+    without them the AI score is 0.
+
+✻ Crunched for 48s · done 7:49 PM
