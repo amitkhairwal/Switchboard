@@ -25,6 +25,21 @@ export const config = {
   },
   // The businesses this deployment serves (each has a Pigeon key above).
   workspaces: ['ws_acme', 'ws_globex'] as string[],
+  outbox: {
+    // One attempt at Pigeon gives up after this long. Pigeon's slow path answers after
+    // 12 s, so we will always time out on it and rely on the Idempotency-Key to retry.
+    attemptTimeoutMs: Number(env('OUTBOX_ATTEMPT_TIMEOUT_MS', '3000')),
+    // A claimed row is ours for this long. It must outlast one attempt (3 s) with margin,
+    // and be short enough that a dead copy's rows are re-taken well inside 60 s.
+    leaseMs: Number(env('OUTBOX_LEASE_MS', '10000')),
+    pollMs: Number(env('OUTBOX_POLL_MS', '150')),
+    maxInflightPerWorkspace: Number(env('OUTBOX_MAX_INFLIGHT', '4')),
+    backoffBaseMs: Number(env('OUTBOX_BACKOFF_BASE_MS', '500')),
+    backoffCapMs: Number(env('OUTBOX_BACKOFF_CAP_MS', '5000')),
+    // Pigeon allows a burst of 8 refilling at 4/s per workspace. We stay just under it.
+    bucketCapacity: Number(env('OUTBOX_BUCKET_CAPACITY', '7')),
+    bucketRefillPerSec: Number(env('OUTBOX_BUCKET_REFILL', '3.5')),
+  },
   oidc: {
     issuer: env('OIDC_ISSUER', 'http://localhost:4020'),
     clientId: env('OIDC_CLIENT_ID', 'switchboard-web'),

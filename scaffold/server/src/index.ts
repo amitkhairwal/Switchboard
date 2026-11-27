@@ -2,6 +2,10 @@ import { createServer } from 'node:http';
 import { createApp } from './app.js';
 import { config } from './config.js';
 import { initStore, mongoStore } from './domain/store.js';
+import { createLimiter } from './outbox/limiter.js';
+import { sendViaPigeon } from './outbox/pigeonClient.js';
+import { createOutboxWorker } from './outbox/worker.js';
+import { getRedis } from './redis.js';
 import { startTimingReport } from './timing.js';
 
 startTimingReport(); // no-op unless SB_TIMING=1
@@ -20,6 +24,16 @@ server.listen(config.port, () => {
   for (;;) {
     try {
       await initStore();
+      createOutboxWorker({
+        send: sendViaPigeon,
+        limiter: createLimiter(getRedis(), { capacity: config.outbox.bucketCapacity, refillPerSec: config.outbox.bucketRefillPerSec }),
+        workspaces: config.workspaces,
+        leaseMs: config.outbox.leaseMs,
+        pollMs: config.outbox.pollMs,
+        maxInflightPerWorkspace: config.outbox.maxInflightPerWorkspace,
+        backoffBaseMs: config.outbox.backoffBaseMs,
+        backoffCapMs: config.outbox.backoffCapMs,
+      }).start();
       ready = true;
       console.log('ready');
       return;

@@ -34,10 +34,16 @@ export interface OutboundDoc {
   pigeon_id: string | null;
   created_at: Date;
   updated_at: Date;
-  // outbox bookkeeping (used by the sender worker)
-  attempts: number;
-  next_attempt_at: Date;
-  lease_until: Date;
+  // Outbox bookkeeping, used only by the sender worker (outbox/worker.ts).
+  // `status` is what the customer-facing lifecycle says (from Pigeon's webhooks);
+  // `state` is whether Pigeon has taken the message yet, and is what the worker acts on.
+  state: 'pending' | 'accepted' | 'dead';
+  accepted_at: Date | null;
+  attempts: number; // failed attempts so far; drives the backoff
+  next_attempt_at: Date; // not before this time
+  lease_until: Date; // another copy may take the row once this has passed
+  lease_token: string | null; // identifies the current holder; fences stale completions
+  last_error: string | null;
 }
 
 export const cols = {
@@ -60,7 +66,7 @@ export async function initStore(): Promise<void> {
     c.conversations.createIndex({ workspace: 1, contact: 1 }, { unique: true }),
     c.conversations.createIndex({ workspace: 1, last_activity: -1 }),
     c.outbound.createIndex({ workspace: 1, client_ref: 1 }, { unique: true }),
-    c.outbound.createIndex({ status: 1, next_attempt_at: 1 }),
+    c.outbound.createIndex({ workspace: 1, state: 1, next_attempt_at: 1, lease_until: 1 }),
   ]);
   await getRedis().ping();
 }
@@ -145,6 +151,9 @@ export const mongoStore: PigeonStore = {
       { workspace, client_ref: clientRef, status: { $in: LOWER[status] } },
       { $set: { status, updated_at: now, ...(pigeonId ? { pigeon_id: pigeonId } : {}) } },
     );
+    // Any status webhook proves Pigeon already has the message (it can arrive
+    // before the slow HTTP response does), so the worker must stop retrying it.
+    await outbound.updateOne({ workspace, client_ref: clientRef, state: 'pending' }, { $set: { state: 'accepted', accepted_at: now, lease_token: null } });
     if (moved.matchedCount === 1) return true;
     // Not moved: either it is already at or past this status (fine), or it does not exist.
     return (await outbound.countDocuments({ workspace, client_ref: clientRef }, { limit: 1 })) === 1;

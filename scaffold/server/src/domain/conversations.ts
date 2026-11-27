@@ -31,9 +31,13 @@ export async function enqueueReply(p: { workspace: string; contact: string; text
       pigeon_id: null,
       created_at: now,
       updated_at: now,
+      state: 'pending',
+      accepted_at: null,
       attempts: 0,
       next_attempt_at: now,
       lease_until: new Date(0),
+      lease_token: null,
+      last_error: null,
     });
     return 'created';
   } catch (err) {
