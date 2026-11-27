@@ -1,3 +1,4 @@
+import { publish } from '../events/bus.js';
 import { collections, ensureConversation, isDuplicateKey } from './store.js';
 
 // Claim: ONE atomic conditional update in MongoDB, on the same document that
@@ -11,6 +12,12 @@ export async function claimConversation(workspace: string, contact: string, agen
     { workspace, contact, assignee: { $in: [null, agent] } }, // free, or already mine
     { $set: { assignee: agent, status: 'open' } },
   );
+  // The holder claiming again changes nothing, so it announces nothing. A failed announcement must not
+  // turn a claim that already happened into an error (the agent would retry and get 200 with no event):
+  // it is logged, and the conversation list stays correct because it is read from MongoDB.
+  if (r.modifiedCount === 1) {
+    await publish(workspace, { type: 'conversation.assigned', contact, assignee: agent }).catch((e: Error) => console.error('assignment not announced:', e.message));
+  }
   return r.matchedCount === 1; // 0 matched = someone else holds it -> 409
 }
 

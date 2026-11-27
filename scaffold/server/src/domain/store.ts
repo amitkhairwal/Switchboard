@@ -1,5 +1,6 @@
 import type { Collection, Db } from 'mongodb';
 import { getDb } from '../db.js';
+import { publish } from '../events/bus.js';
 import { getRedis } from '../redis.js';
 import { timed } from '../timing.js';
 
@@ -141,22 +142,30 @@ export const mongoStore: PigeonStore = {
     // Runs even for a duplicate: if a crash hit between the two writes the first
     // time, Pigeon's retry repairs the conversation row.
     await timed('mongo.conversation', () => ensureConversation(m.workspace, m.contact, m.occurredAt));
+    // Published on every delivery, not only the first: the marker (key "in:<id>") makes it once-only, and
+    // it means a crash after the write but before this line is repaired by Pigeon's retry. If Redis is
+    // down this throws, the webhook answers 503, and Pigeon retries.
+    await publish(m.workspace, { type: 'message.inbound', contact: m.contact, message_id: m.messageId, text: m.text, occurred_at: m.occurredAt.toISOString() }, `in:${m.messageId}`);
     return inserted;
   },
 
   async applyStatus(workspace, clientRef, status, pigeonId) {
     const { outbound } = await collections();
     const now = new Date();
-    const moved = await outbound.updateOne(
+    const moved = await outbound.findOneAndUpdate(
       { workspace, client_ref: clientRef, status: { $in: LOWER[status] } },
       { $set: { status, updated_at: now, ...(pigeonId ? { pigeon_id: pigeonId } : {}) } },
+      { returnDocument: 'after' },
     );
     // Any status webhook proves Pigeon already has the message (it can arrive
     // before the slow HTTP response does), so the worker must stop retrying it.
     await outbound.updateOne({ workspace, client_ref: clientRef, state: 'pending' }, { $set: { state: 'accepted', accepted_at: now, lease_token: null } });
-    if (moved.matchedCount === 1) return true;
     // Not moved: either it is already at or past this status (fine), or it does not exist.
-    return (await outbound.countDocuments({ workspace, client_ref: clientRef }, { limit: 1 })) === 1;
+    const row = moved ?? (await outbound.findOne({ workspace, client_ref: clientRef }));
+    if (!row) return false;
+    // Same repair-by-retry rule as above: announce the status the row has reached, once.
+    if (row.status === status) await publish(workspace, { type: 'message.status', contact: row.contact, client_ref: clientRef, status }, `st:${clientRef}:${status}`);
+    return true;
   },
 };
 
@@ -171,7 +180,9 @@ export async function resetAll(): Promise<void> {
   do {
     const [next, keys] = await redis.scan(cursor, 'MATCH', 'sb:*', 'COUNT', 200);
     cursor = next;
-    const doomed = keys.filter((k) => !k.startsWith('sb:sess:') && !k.startsWith('sb:oidc:')); // sessions may stay
+    // Sessions and login attempts may stay. The seq counters must stay too: frames carry a number that only
+    // goes up, and connected browsers would otherwise see it jump back. (The frames themselves, sb:ev:*, go.)
+    const doomed = keys.filter((k) => !k.startsWith('sb:sess:') && !k.startsWith('sb:oidc:') && !k.startsWith('sb:seq:'));
     if (doomed.length) await redis.del(...doomed);
   } while (cursor !== '0');
 }

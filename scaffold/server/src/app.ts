@@ -1,5 +1,7 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { config } from './config.js';
+import { apiRouter } from './api/routes.js';
+import { authRouter } from './auth/routes.js';
 import { graderRouter } from './grader/routes.js';
 import type { PigeonStore } from './domain/store.js';
 import { createPigeonHandler } from './webhooks/pigeon.js';
@@ -38,6 +40,8 @@ export function createApp(opts: { store: PigeonStore; isReady: () => boolean }) 
 
   app.use(express.json({ limit: '1mb' }));
   app.use('/__grader', graderRouter);
+  app.use('/auth', authRouter);
+  app.use('/api', apiRouter);
 
   // Last resort. A storage failure on the webhook is a 5xx ON PURPOSE: Pigeon must
   // retry, because we did not store the event. Bad input never reaches here.

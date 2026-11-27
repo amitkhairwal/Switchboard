@@ -2,6 +2,8 @@ import { createServer } from 'node:http';
 import { createApp } from './app.js';
 import { config } from './config.js';
 import { initStore, mongoStore } from './domain/store.js';
+import { startEventReaders } from './events/bus.js';
+import { attachWebSocket } from './ws.js';
 import { createLimiter } from './outbox/limiter.js';
 import { sendViaPigeon } from './outbox/pigeonClient.js';
 import { createOutboxWorker } from './outbox/worker.js';
@@ -14,8 +16,8 @@ const app = createApp({ store: mongoStore, isReady: () => ready });
 
 process.on('unhandledRejection', (e) => console.error('unhandledRejection', e));
 
-// A plain http server, so WebSockets can attach to it later.
 const server = createServer(app);
+attachWebSocket(server); // GET /ws
 server.listen(config.port, () => {
   console.log(`server on http://localhost:${config.port}`);
 });
@@ -24,6 +26,7 @@ server.listen(config.port, () => {
   for (;;) {
     try {
       await initStore();
+      startEventReaders(config.workspaces); // fan out events published by any copy to this copy's sockets
       createOutboxWorker({
         send: sendViaPigeon,
         limiter: createLimiter(getRedis(), { capacity: config.outbox.bucketCapacity, refillPerSec: config.outbox.bucketRefillPerSec }),
