@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+.check-logs/
+dump.rdb
+.DS_Store
+.check-logs/
+CHECK_REPORT.local.json
