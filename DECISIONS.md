@@ -8,22 +8,35 @@ Work in progress; kept up to date as the build goes on.
   of PIGEON.md, idempotent storage of inbound messages (unique `(workspace, message_id)`).
 - **Grader endpoints** (`/__grader/*`): token guard, reset, snapshot, reply, claim.
 - **Outbox** (replies to customers), described below.
-- **Not built:** login (OIDC), `/api/*`, the WebSocket and the React app. Level 5 of the check
-  (15 points) therefore scores 0, and nobody can use this as an inbox yet: there is no way to sign in,
-  list conversations, read messages, claim or reply except through the `/__grader/*` endpoints.
-  I started level 5 (OIDC login with state and PKCE in Redis, sessions in Redis, `/api/me`,
-  `/api/conversations`, `/ws` with an event stream and `after=` replay), but it was never run, so it is
-  **not in this repository**: I would not ship code I had not run, and it changes the webhook path that
-  the passing checks rely on.
+- **Login** (`/auth/login`, `/auth/callback`, `/auth/logout`): OIDC authorization code + PKCE (S256). The state,
+  PKCE verifier and nonce are kept in Redis under the `state` value (single use, 10 min), so any copy of the
+  server can finish a login another copy started. The id_token is verified (RS256 against the IdP's `/jwks`,
+  issuer, audience, nonce, expiry). Sessions are random 256-bit ids in Redis (`sb:sess:<id>`); the cookie is
+  HttpOnly and SameSite=Lax.
+- **API:** `GET /api/me`, `GET /api/conversations?workspace=` (newest activity first, keyset-paginated).
+  401 without a session, 403 for a signed-in non-member (also for a workspace that does not exist, so existence
+  is not revealed). Every workspace id from a request goes through one membership check before any query.
+- **WebSocket** `GET /ws?workspace=&after=`: refused before the upgrade (401 / 403 / cross-origin 403). Events go
+  through one Redis Stream per workspace; a single Lua script does `INCR` and `XADD` together, so `seq` is
+  assigned and appended atomically and the stream is always in `seq` order, whichever copy publishes. Each copy
+  reads the stream and fans out to its own sockets. `after=N` replays everything missed, then continues live;
+  frames that arrive during the replay are held back and filtered by `seq`, so there is no gap and no repeat.
+  Publishing is idempotent (a marker written by the same script), so Pigeon's retries and duplicates never
+  produce a second frame, and a crash between the database write and the publish is repaired by the retry.
+  `/__grader/reset` deletes the frames but keeps the `seq` counters, so `seq` never goes backwards.
+- **Not built:** the React app (the scaffold's placeholder page is all there is), close/reopen, and the
+  agent-facing endpoints for reading a conversation's messages, claiming and replying (the UI would need them;
+  only the `/__grader/*` versions exist). Nobody can use this as an inbox in a browser yet.
 
 ## What was run
 
-- **`CHECK_REPORT.json` is from `npm run check` only** (level 1, profile "quick"): 24 of 24. The full check
-  (`npm run check:full`, levels 1, 2, 3 and 5) was **not** run for this final commit, for lack of time.
-- Before that, `check:full` was run once on an earlier commit (`3f372f6`, the same server code apart from
-  documentation): level 1 24/24, level 2 14/14, level 3 22/22 (two copies), level 5 0/15 (not built); 60 of 75.
-  That report was overwritten by this one, but the numbers are in the git history of `CHECK_REPORT.json`.
-- Server tests (`npm --prefix scaffold/server test`): 29 passing at the last run.
+- **`npm run check:full` on a fresh clone** of the branch (code of commit `4a1bef5`, plus a test-only fix):
+  **75 of 75**: level 1 24/24, level 2 14/14, level 3 22/22 (two copies), level 5 15/15. `CHECK_REPORT.json` is that report.
+  Level 4 (10 points, the written rules) cannot be run locally and is not in that number.
+- Server tests (`npm --prefix scaffold/server test`): 41 passing, about 45 s.
+- **Honest history:** commit `4a1bef5` was pushed before it had been run (level 5 was written, typechecked, and
+  shelved when time ran short). Running it afterwards on a fresh clone found one bug, in a test, not in the
+  server: `bus.test.ts` left a MongoDB connection open, so `npm test` never finished. Fixed in the next commit.
 
 ## Cut on purpose
 
@@ -91,9 +104,15 @@ default `localhost` URL is unchanged.
 
 ## What I know is still wrong
 
-- **Level 5 and the product around it are missing:** no login, no `/api/*`, no WebSocket, no UI.
-  A reviewer cannot use this as an inbox yet. Also not built: close/reopen, the inbox list and
-  message-reading endpoints for agents, tests of the web side (there is none).
+- **There is no web app,** and the agent-facing endpoints a UI needs (read a conversation, claim, reply, close and
+  reopen) do not exist outside `/__grader/*`. The login, `/api` and WebSocket parts are built and checked, but a
+  reviewer cannot use this as an inbox in a browser. No web-side tests.
+- **Redis restart loses the event `seq` counters and frames** (the counters live in Redis, not MongoDB). `seq` would
+  then restart from 1, and a browser reconnecting with `after=<old seq>` would silently miss events until it
+  caught up. Not handled. Only the frames of the last 50 000 events per workspace are kept for replay.
+- **A claim is announced at most once:** if Redis is down at that moment the claim stands (it is in MongoDB) but
+  no `conversation.assigned` frame is sent. Inbound messages and statuses do not have this gap.
+- **Sessions are 8 h at most and there is no refresh;** logout only deletes the Redis key.
 - **Clocks:** leases are compared with each server's own clock. Fine on one machine; across machines,
   clock skew would let a lease look expired early or late.
 - **Redis down:** the worker sends nothing (it cannot see the rate limit, and sending blind would break

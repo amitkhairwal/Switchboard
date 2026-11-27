@@ -1,7 +1,7 @@
 # Switchboard
 
 A shared team inbox (see `BRIEF.md`). **Unfinished:** the inbound/outbound message pipeline is built and checked;
-login, `/api/*`, the WebSocket and the web app are not. `DECISIONS.md` has the full list of what is built, cut and known weak.
+the web app is not (login, `/api/*` and the WebSocket are, and pass the check). `DECISIONS.md` has the full list of what is built, cut and known weak.
 
 ## Run it from a clean clone
 
