@@ -3,6 +3,7 @@ import { config } from './config.js';
 import { graderRouter } from './grader/routes.js';
 import type { PigeonStore } from './domain/store.js';
 import { createPigeonHandler } from './webhooks/pigeon.js';
+import { record } from './timing.js';
 
 export function createApp(opts: { store: PigeonStore; isReady: () => boolean }) {
   const app = express();
@@ -20,9 +21,20 @@ export function createApp(opts: { store: PigeonStore; isReady: () => boolean }) 
     workspaces: new Set(config.workspaces),
     store: opts.store,
   });
-  app.post('/webhooks/pigeon', express.raw({ type: () => true, limit: '2mb' }), (req, res, next) => {
-    pigeonHandler(req, res).catch(next);
-  });
+  app.post(
+    '/webhooks/pigeon',
+    (req, res, next) => {
+      const t0 = performance.now(); // debug timing only (SB_TIMING=1)
+      res.on('finish', () => record('total', performance.now() - t0));
+      (req as unknown as { t0: number }).t0 = t0;
+      next();
+    },
+    express.raw({ type: () => true, limit: '2mb' }),
+    (req, res, next) => {
+      record('read_body', performance.now() - (req as unknown as { t0: number }).t0);
+      pigeonHandler(req, res).catch(next);
+    },
+  );
 
   app.use(express.json({ limit: '1mb' }));
   app.use('/__grader', graderRouter);

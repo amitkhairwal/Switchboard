@@ -7,7 +7,7 @@ let connecting: Promise<MongoClient> | undefined;
 // Connections are opened up front (minPoolSize), so a burst of webhooks on a
 // freshly started copy does not pay for thirty handshakes inside Pigeon's 5 s limit.
 export async function getDb(): Promise<Db> {
-  connecting ??= new MongoClient(config.mongoUrl, { minPoolSize: 10, maxPoolSize: 50, serverSelectionTimeoutMS: 5000 })
+  connecting ??= new MongoClient(config.mongoUrl, { minPoolSize: Number(process.env.SB_MONGO_MIN_POOL ?? 10), maxPoolSize: 50, serverSelectionTimeoutMS: 5000 })
     .connect()
     .catch((err) => {
       connecting = undefined; // let the next call try again

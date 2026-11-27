@@ -2,7 +2,9 @@ import { createServer } from 'node:http';
 import { createApp } from './app.js';
 import { config } from './config.js';
 import { initStore, mongoStore } from './domain/store.js';
+import { startTimingReport } from './timing.js';
 
+startTimingReport(); // no-op unless SB_TIMING=1
 let ready = false;
 const app = createApp({ store: mongoStore, isReady: () => ready });
 

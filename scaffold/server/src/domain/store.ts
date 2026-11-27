@@ -1,6 +1,7 @@
 import type { Collection, Db } from 'mongodb';
 import { getDb } from '../db.js';
 import { getRedis } from '../redis.js';
+import { timed } from '../timing.js';
 
 // ---- documents -----------------------------------------------------------
 export type OutboundStatus = 'queued' | 'sent' | 'delivered' | 'failed';
@@ -112,7 +113,7 @@ export const mongoStore: PigeonStore = {
     const { messages } = await collections();
     let inserted = false;
     try {
-      const r = await messages.updateOne(
+      const r = await timed('mongo.message', () => messages.updateOne(
         { workspace: m.workspace, message_id: m.messageId },
         {
           $setOnInsert: {
@@ -126,14 +127,14 @@ export const mongoStore: PigeonStore = {
           },
         },
         { upsert: true },
-      );
+      ));
       inserted = r.upsertedCount === 1;
     } catch (err) {
       if (!isDuplicateKey(err)) throw err; // two copies upserting the same id: one lost the race
     }
     // Runs even for a duplicate: if a crash hit between the two writes the first
     // time, Pigeon's retry repairs the conversation row.
-    await ensureConversation(m.workspace, m.contact, m.occurredAt);
+    await timed('mongo.conversation', () => ensureConversation(m.workspace, m.contact, m.occurredAt));
     return inserted;
   },
 

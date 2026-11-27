@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express';
 import { verifySignature } from './signature.js';
 import type { OutboundStatus, PigeonStore } from '../domain/store.js';
+import { record, timed } from '../timing.js';
 
 export interface PigeonDeps {
   secret: string;
@@ -22,7 +23,9 @@ export function createPigeonHandler(deps: PigeonDeps) {
 
     // 1. Authenticity first, before we look at what the body says. A forged
     //    request gets 401 whatever it contains, even if it is not JSON.
+    const tVerify = performance.now();
     const sig = verifySignature(req.header('x-pigeon-signature'), raw, deps.secret, Math.floor(now() / 1000));
+    record('verify', performance.now() - tVerify);
     if (sig !== 'ok') {
       res.status(401).json({ error: sig === 'stale' ? 'timestamp too old' : 'invalid signature' });
       return;
@@ -54,14 +57,15 @@ export function createPigeonHandler(deps: PigeonDeps) {
         res.status(400).json({ error: 'malformed message.inbound' });
         return;
       }
-      await deps.store.storeInbound({
+      const message = {
         workspace,
         contact: data.from,
         messageId: data.message_id,
         text: typeof data.text === 'string' ? data.text : '',
         occurredAt,
         eventId: event.id,
-      });
+      };
+      await timed('store', () => deps.store.storeInbound(message));
       res.status(200).json({ ok: true });
       return;
     }
