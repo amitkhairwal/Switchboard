@@ -1,13 +1,13 @@
 {
   "profile": "full",
-  "startedAt": "2026-11-27T15:11:11.453Z",
+  "startedAt": "2026-11-27T15:24:28.269Z",
   "checks": [
     {
       "level": 1,
       "id": "inbound_complete",
       "max": 4,
       "got": 4,
-      "detail": "175 of 175 genuine messages stored"
+      "detail": "169 of 169 genuine messages stored"
     },
     {
       "level": 1,
@@ -49,7 +49,7 @@
       "id": "ack_speed",
       "max": 1,
       "got": 1,
-      "detail": "p95 acknowledgement 408 ms, 0 first attempts not acknowledged"
+      "detail": "p95 acknowledgement 49 ms, 0 first attempts not acknowledged"
     },
     {
       "level": 1,
@@ -91,7 +91,7 @@
       "id": "crash_inbound_complete",
       "max": 3,
       "got": 3,
-      "detail": "killed at 9 s, down 4 s: 181 of 181 genuine messages stored"
+      "detail": "killed at 9 s, down 4 s: 175 of 175 genuine messages stored"
     },
     {
       "level": 2,
@@ -133,7 +133,7 @@
       "id": "multi_inbound_complete",
       "max": 2,
       "got": 2,
-      "detail": "186 of 186 genuine messages stored"
+      "detail": "172 of 172 genuine messages stored"
     },
     {
       "level": 3,
@@ -224,7 +224,7 @@
       "id": "socket_replay",
       "max": 3,
       "got": 3,
-      "detail": "4 of 4 messages that arrived while disconnected were replayed after reconnecting with after=335; 0 frames at or before that seq were sent again"
+      "detail": "4 of 4 messages that arrived while disconnected were replayed after reconnecting with after=669; 0 frames at or before that seq were sent again"
     }
   ],
   "score": 75,
@@ -247,5 +247,5 @@
       "max": 15
     }
   },
-  "finishedAt": "2026-11-27T15:15:08.557Z"
+  "finishedAt": "2026-11-27T15:28:16.716Z"
 }

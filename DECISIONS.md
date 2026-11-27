@@ -24,16 +24,27 @@ Work in progress; kept up to date as the build goes on.
   Publishing is idempotent (a marker written by the same script), so Pigeon's retries and duplicates never
   produce a second frame, and a crash between the database write and the publish is repaired by the retry.
   `/__grader/reset` deletes the frames but keeps the `seq` counters, so `seq` never goes backwards.
-- **Not built:** the React app (the scaffold's placeholder page is all there is), close/reopen, and the
-  agent-facing endpoints for reading a conversation's messages, claiming and replying (the UI would need them;
-  only the `/__grader/*` versions exist). Nobody can use this as an inbox in a browser yet.
+- **Agent API** (session + workspace-membership checked, state-changing calls also refuse a foreign `Origin`):
+  `GET /api/conversation` (messages in both directions, oldest first, with each reply's status), `POST /api/reply`
+  (stored first, `202`, same `client_ref` is one reply; announces `queued` to other agents), `POST /api/claim`
+  (the agent is the signed-in user, never taken from the request; `409` if held), `POST /api/conversation/status`
+  (close / reopen). They call the same functions as the `/__grader/*` endpoints.
+- **Web app** (React, `scaffold/web`): sign in through the IdP, workspace picker for users in several, inbox list
+  (newest activity first), conversation view, reply with live status (queued / sent / delivered / failed), claim,
+  close / reopen, live updates over `/ws`. After a dropped connection it reconnects with `after=<last seq>`.
+  Kept deliberately small: one file of components, no router, no state library.
+- **Not built:** pagination in the web app (it loads the newest 100 conversations and 200 messages), unread
+  markers, typing indicators, a way to release a claim, per-role permissions (admins and agents can do the same
+  things; roles are only displayed).
 
 ## What was run
 
-- **`npm run check:full` on a fresh clone** of the branch (code of commit `4a1bef5`, plus a test-only fix):
-  **75 of 75**: level 1 24/24, level 2 14/14, level 3 22/22 (two copies), level 5 15/15. `CHECK_REPORT.json` is that report.
+- **`npm run check:full` on the final code** (with the agent API and web app added): **75 of 75**: level 1 24/24,
+  level 2 14/14, level 3 22/22 (two copies), level 5 15/15. `CHECK_REPORT.json` is that report. The same score was
+  reached earlier on a fresh clone of commit `4a1bef5`, before the agent API and web app existed.
   Level 4 (10 points, the written rules) cannot be run locally and is not in that number.
-- Server tests (`npm --prefix scaffold/server test`): 41 passing, about 45 s.
+- Server tests (`npm --prefix scaffold/server test`): 44 passing, about 50 s. Server and web both typecheck, and the
+  web app builds (`npm --prefix scaffold/web run build`).
 - **Honest history:** commit `4a1bef5` was pushed before it had been run (level 5 was written, typechecked, and
   shelved when time ran short). Running it afterwards on a fresh clone found one bug, in a test, not in the
   server: `bus.test.ts` left a MongoDB connection open, so `npm test` never finished. Fixed in the next commit.
@@ -104,9 +115,11 @@ default `localhost` URL is unchanged.
 
 ## What I know is still wrong
 
-- **There is no web app,** and the agent-facing endpoints a UI needs (read a conversation, claim, reply, close and
-  reopen) do not exist outside `/__grader/*`. The login, `/api` and WebSocket parts are built and checked, but a
-  reviewer cannot use this as an inbox in a browser. No web-side tests.
+- **The web app has no automated tests.** I clicked through it once in a real browser (sign in as Ben, the inbox
+  filled live with only `ws_acme` contacts, claimed a conversation, sent a reply and watched it become `delivered`),
+  but that is a manual smoke test, not a regression test. It was not tried on a phone-sized screen, with two
+  browsers at once, or across a dropped connection.
+- **Roles are not enforced beyond membership:** `admin` and `agent` can do the same things.
 - **Redis restart loses the event `seq` counters and frames** (the counters live in Redis, not MongoDB). `seq` would
   then restart from 1, and a browser reconnecting with `after=<old seq>` would silently miss events until it
   caught up. Not handled. Only the frames of the last 50 000 events per workspace are kept for replay.

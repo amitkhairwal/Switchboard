@@ -192,3 +192,51 @@ test('ws: frames published while the replay is being sent are neither lost nor r
   assert.ok(seqs.every((s, i) => i === 0 || s === seqs[i - 1] + 1), 'contiguous seq, no gap, no repeat');
   sock.close();
 });
+
+// ---- agent endpoints (what the web app uses) -----------------------------------------------------
+const post = (path: string, body: unknown, cookie?: string, extra: Record<string, string> = {}) =>
+  fetch(`http://${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}), ...extra }, body: JSON.stringify(body) });
+
+test('agent API: reply is stored once (202) however often it is retried, and shows up in the conversation', { skip: !available }, async () => {
+  const contact = '+3000001';
+  await ensureConversation(WS_A, contact, new Date());
+  const body = { workspace: WS_A, contact, text: 'hello from the UI', client_ref: 'ui_test_1' };
+  const results = await Promise.all(Array.from({ length: 5 }, () => post('/api/reply', body, cookieA).then((r) => r.status)));
+  assert.deepEqual([...new Set(results)], [202]);
+  const { outbound } = await collections();
+  assert.equal(await outbound.countDocuments({ workspace: WS_A, client_ref: 'ui_test_1' }), 1);
+  const thread = await (await get(`/api/conversation?workspace=${WS_A}&contact=${encodeURIComponent(contact)}`, cookieA)).json();
+  assert.deepEqual(thread.messages.map((m: { direction: string; text: string; status: string }) => [m.direction, m.text, m.status]), [['out', 'hello from the UI', 'queued']]);
+  assert.equal((await post('/api/reply', { workspace: WS_A, contact, text: '   ' }, cookieA)).status, 400);
+  assert.equal((await post('/api/reply', { workspace: WS_A, contact, text: 'x', client_ref: 'bad ref!' }, cookieA)).status, 400);
+});
+
+test('agent API: claim uses the signed-in user (one winner), and close / reopen work', { skip: !available }, async () => {
+  const contact = '+3000002';
+  await ensureConversation(WS_A, contact, new Date());
+  const cookieA2 = `sb_session=${await createSession({ sub: 'u_a2', workspaces: [{ id: WS_A, role: 'agent' }] }, 300)}`;
+  const [one, two] = await Promise.all([post('/api/claim', { workspace: WS_A, contact }, cookieA), post('/api/claim', { workspace: WS_A, contact }, cookieA2)]);
+  assert.deepEqual([one.status, two.status].sort(), [200, 409]);
+  const winner = one.status === 200 ? 'u_a' : 'u_a2';
+  assert.equal((await (await get(`/api/conversation?workspace=${WS_A}&contact=${encodeURIComponent(contact)}`, cookieA)).json()).assignee, winner);
+  assert.equal((await post('/api/claim', { workspace: WS_A, contact }, winner === 'u_a' ? cookieA : cookieA2)).status, 200, 'holder claiming again');
+  assert.equal((await post('/api/conversation/status', { workspace: WS_A, contact, status: 'closed' }, cookieA)).status, 200);
+  assert.equal((await (await get(`/api/conversation?workspace=${WS_A}&contact=${encodeURIComponent(contact)}`, cookieA)).json()).status, 'closed');
+  assert.equal((await post('/api/conversation/status', { workspace: WS_A, contact, status: 'nonsense' }, cookieA)).status, 400);
+  assert.equal((await post('/api/conversation/status', { workspace: WS_A, contact: '+nobody', status: 'open' }, cookieA)).status, 404);
+});
+
+test('agent API: other workspaces, no session, and other sites are all refused', { skip: !available }, async () => {
+  const contact = '+3000003';
+  await ensureConversation(WS_B, contact, new Date());
+  for (const path of ['/api/reply', '/api/claim', '/api/conversation/status']) {
+    const body = { workspace: WS_B, contact, text: 'x', status: 'closed' };
+    assert.equal((await post(path, body, cookieA)).status, 403, `${path} into a workspace the user is not in`);
+    assert.equal((await post(path, body)).status, 401, `${path} without a session`);
+    assert.equal((await post(path, { workspace: WS_A, contact, text: 'x', status: 'closed' }, cookieA, { origin: 'http://evil.example' })).status, 403, `${path} from another site`);
+  }
+  assert.equal((await get(`/api/conversation?workspace=${WS_B}&contact=${encodeURIComponent(contact)}`, cookieA)).status, 403);
+  assert.equal((await get(`/api/conversation?workspace=${WS_B}&contact=${encodeURIComponent(contact)}`)).status, 401);
+  const { outbound } = await collections();
+  assert.equal(await outbound.countDocuments({ workspace: WS_B }), 0, 'nothing was written into the other workspace');
+});

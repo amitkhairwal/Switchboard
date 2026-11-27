@@ -1,8 +1,7 @@
-import type { IncomingMessage, Server } from 'node:http';
+import type { Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer } from 'ws';
-import { config } from './config.js';
-import { isMember, loadSession } from './auth/session.js';
+import { allowedOrigin, isMember, loadSession } from './auth/session.js';
 import { currentSeq, readSince, subscribe, type Frame } from './events/bus.js';
 
 // GET /ws?workspace=<id>[&after=<seq>]
@@ -17,13 +16,6 @@ const MAX_BUFFERED_BYTES = 1_000_000; // a client this far behind is cut off; it
 function refuse(socket: Duplex, status: number, text: string): void {
   socket.write(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
   socket.destroy();
-}
-
-function allowedOrigin(req: IncomingMessage): boolean {
-  const origin = req.headers.origin;
-  if (!origin) return true; // not a browser (or same-origin without the header)
-  const own = new Set([config.webOrigin, new URL(config.oidc.redirectUri).origin, `http://${req.headers.host}`]);
-  return own.has(origin);
 }
 
 export function attachWebSocket(server: Server, log: (...a: unknown[]) => void = console.error): void {

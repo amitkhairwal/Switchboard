@@ -48,6 +48,15 @@ export async function loadSession(cookieHeader: string | undefined): Promise<Ses
 
 export const isMember = (s: Session, workspace: string): boolean => s.workspaces.some((w) => w.id === workspace);
 
+// Cross-site protection for WebSockets and for every state-changing /api call: a browser always sends
+// Origin on those, and it must be our own site. No Origin = not a browser (curl, the check), allowed.
+export function allowedOrigin(req: { headers: { origin?: string; host?: string } }): boolean {
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  const own = new Set([config.webOrigin, new URL(config.oidc.redirectUri).origin, `http://${req.headers.host}`]);
+  return own.has(origin);
+}
+
 export function sessionCookie(id: string, maxAgeSeconds: number): string {
   const secure = config.webOrigin.startsWith('https:') ? '; Secure' : '';
   return `${COOKIE_NAME}=${id}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${secure}`;

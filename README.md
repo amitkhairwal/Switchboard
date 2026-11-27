@@ -1,7 +1,7 @@
 # Switchboard
 
-A shared team inbox (see `BRIEF.md`). **Unfinished:** the inbound/outbound message pipeline is built and checked;
-the web app is not (login, `/api/*` and the WebSocket are, and pass the check). `DECISIONS.md` has the full list of what is built, cut and known weak.
+A shared team inbox (see `BRIEF.md`). Cut: encrypted notes, search, billing. Built:
+login, the agent API, the WebSocket and a small React web app are built, and the check passes (75 of 75 on the runnable levels). `DECISIONS.md` has the full list of what is built, cut and known weak.
 
 ## Run it from a clean clone
 
@@ -10,8 +10,9 @@ Needs Node 22, Docker, and the ports 4000, 4010, 4020, 27017, 6379 free.
 ```
 npm run up                  # MongoDB, Redis, Pigeon (messaging), the mock IdP, in Docker
 npm run doctor              # confirms every service answers
-npm run scaffold:install    # installs the server (and the empty web shell)
+npm run scaffold:install    # installs the server and the web app
 npm run scaffold:server     # the server on http://localhost:4000   (npm run start:server for a plain run)
+npm run scaffold:web        # the web app on http://localhost:5173 (sign in with any of the five test users)
 npm run check               # level 1 of the check; stop the server above first, it starts its own
 npm run check:full          # levels 1, 2, 3 and 5 (about 4 minutes)
 ```
