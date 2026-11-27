@@ -3,7 +3,7 @@ import { after, test } from 'node:test';
 
 process.env.MONGO_URL = (process.env.MONGO_URL ?? 'mongodb://localhost:27017/switchboard').replace(/\/[^/]*$/, '') + '/switchboard_test_bus';
 const { publish, readSince, currentSeq } = await import('./bus.js');
-const { resetAll } = await import('../domain/store.js');
+const { resetAll, collections } = await import('../domain/store.js');
 const { getRedis } = await import('../redis.js');
 
 let available = true;
@@ -16,6 +16,7 @@ const ws = `t_bus_${Math.random().toString(36).slice(2, 8)}`;
 after(async () => {
   if (available) await getRedis().del(`sb:seq:${ws}`, `sb:ev:${ws}`);
   getRedis().disconnect();
+  (await collections()).db.client.close(); // resetAll() opened a MongoDB pool; an open pool keeps this process alive forever
 });
 
 const all = async (afterSeq = 0) => {
